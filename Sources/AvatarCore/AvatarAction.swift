@@ -29,7 +29,8 @@ public struct CommandInterpreter: Sendable {
     public init() {}
 
     public func interpret(_ input: String) -> CommandInterpretation {
-        let normalized = input
+        let normalized =
+            input
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
 

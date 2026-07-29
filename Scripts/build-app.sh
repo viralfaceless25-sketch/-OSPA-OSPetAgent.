@@ -14,5 +14,6 @@ mkdir -p "$app_dir/Contents/MacOS"
 cp "$binary_dir/AvatarCompanion" "$app_dir/Contents/MacOS/AvatarCompanion"
 cp "$project_dir/Packaging/Info.plist" "$app_dir/Contents/Info.plist"
 
+xattr -cr "$app_dir"
 codesign --force --deep --sign - "$app_dir"
 echo "$app_dir"

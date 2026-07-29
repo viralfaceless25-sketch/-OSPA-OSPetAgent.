@@ -1,0 +1,10 @@
+{
+  "indentation": {
+    "spaces": 4
+  },
+  "lineLength": 100,
+  "rules": {
+    "UseLetInEveryBoundCaseVariable": false
+  },
+  "version": 1
+}

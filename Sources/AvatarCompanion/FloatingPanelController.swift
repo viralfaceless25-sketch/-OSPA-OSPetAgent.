@@ -80,9 +80,10 @@ final class FloatingPanelController {
 
     private func resize(expanded: Bool) {
         let oldFrame = panel.frame
+        let availableHeight = panel.screen?.visibleFrame.height ?? 700
         let newSize = NSSize(
             width: expanded ? 340 : 128,
-            height: expanded ? 480 : 132
+            height: expanded ? min(650, availableHeight - 32) : 132
         )
         let newOrigin = NSPoint(
             x: oldFrame.maxX - newSize.width,

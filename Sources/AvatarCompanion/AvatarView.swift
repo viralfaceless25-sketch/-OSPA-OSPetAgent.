@@ -13,8 +13,11 @@ struct AvatarView: View {
                 Divider()
                     .padding(.horizontal, 14)
 
-                commandSurface
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                ScrollView {
+                    commandSurface
+                }
+                .frame(height: 520)
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .frame(width: model.isExpanded ? 340 : 128)
@@ -108,8 +111,8 @@ struct AvatarView: View {
                 Button("Preview") {
                     model.previewCommand()
                 }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
             }
 
             Text(model.status)
@@ -130,16 +133,18 @@ struct AvatarView: View {
                     Button("Confirm and copy") {
                         model.performPreviewedAction()
                     }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                        .disabled(
-                            model.safety.observeOnly || model.safety.emergencyStopped
-                        )
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(
+                        model.safety.observeOnly || model.safety.emergencyStopped
+                    )
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
             }
+
+            discoverySurface
 
             Toggle(
                 "Observe only",
@@ -157,12 +162,15 @@ struct AvatarView: View {
                 Button("Clear stop in observe-only mode") {
                     model.resumeObservation()
                 }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
+                .buttonStyle(.bordered)
+                .controlSize(.large)
             } else {
-                Button(role: .destructive, action: {
-                    model.emergencyStop()
-                }) {
+                Button(
+                    role: .destructive,
+                    action: {
+                        model.emergencyStop()
+                    }
+                ) {
                     Label("Emergency stop", systemImage: "stop.fill")
                         .frame(maxWidth: .infinity)
                 }
@@ -175,6 +183,73 @@ struct AvatarView: View {
         .onAppear {
             commandFocused = true
         }
+    }
+
+    private var discoverySurface: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("App discovery", systemImage: "app.badge.checkmark")
+                .font(.headline)
+
+            Text(model.discoveryStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                model.identifyForegroundApp()
+            } label: {
+                Label("Identify foreground app", systemImage: "scope")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .accessibilityHint("Reads app name and bundle identifier only")
+
+            if let app = model.discoveredApp {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(app.displayName)
+                        .font(.subheadline.weight(.semibold))
+                    Text(app.bundleIdentifier)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                TextField(
+                    "https://official.example/docs",
+                    text: $model.officialDocumentationURL
+                )
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Official documentation URL")
+
+                Button("Prepare research scope") {
+                    model.prepareResearchScope()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+
+                if let request = model.researchRequest {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Approval preview")
+                            .font(.caption.weight(.semibold))
+                        Text("Hosts: \(request.approvedHosts.sorted().joined(separator: ", "))")
+                        Text("Limit: \(request.maxDocuments) documents • 15 minutes")
+                        Text("Fetched text remains untrusted until claim review.")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    Button("Approve this research scope") {
+                        model.approveResearchScope()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(model.researchAuthorization != nil)
+                }
+            }
+        }
+        .padding(12)
+        .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
     }
 
     private var modeLabel: String {

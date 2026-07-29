@@ -1,7 +1,8 @@
 # Avatar Companion
 
 Native macOS foundation for a lightweight, draggable desktop avatar. Milestone 1
-deliberately proves the interaction and safety boundary before adding automation.
+proves the interaction boundary. Milestone 2 adds app-agnostic discovery, research,
+planning, consent, and audit contracts without enabling live automation.
 
 ## Included
 
@@ -14,9 +15,16 @@ deliberately proves the interaction and safety boundary before adding automation
 - Preview plus explicit confirmation before any side effect
 - Safe demo action: `copy time` writes current local time to clipboard
 - Pure policy layer with Swift Testing coverage
+- Foreground app identification using app name and bundle ID only
+- User-reviewed official-documentation research scope
+- Untrusted research artifact and reviewed-claim boundary
+- Generic capability profiles and foreground computer-use adapter contract
+- App-targeted, expiring, one-shot consent and action plans
+- Execution preflight for focus, Accessibility permission, stop, and expiry
+- Redacted audit event model
 
-No credentials, screen capture, Accessibility permission, files, network, shell,
-AppleScript, or global keyboard monitoring are used.
+No credentials, screen capture, Accessibility request, input generation, files,
+network fetch, shell, AppleScript, or global keyboard monitoring are used.
 
 ## Requirements
 
@@ -49,23 +57,39 @@ identity, hardened runtime, notarization, and a unique bundle identifier.
 5. Paste elsewhere to verify.
 6. Select **Emergency stop**; pending action clears and observe-only returns.
 
+## Try app discovery and research approval
+
+1. Bring any desktop app to foreground, then open Avatar Companion from menu bar.
+2. Select **Identify foreground app**. Only name and bundle ID are collected.
+3. Enter an official HTTPS documentation URL.
+4. Select **Prepare research scope**.
+5. Review exact host, five-document cap, 15-minute expiry, and trust warning.
+6. Select **Approve this research scope**.
+
+Approval is demonstrable state only. No page is fetched in this milestone.
+
 ## Architecture
 
 ```text
 AvatarView / menu bar
         │ intent
         ▼
-    AvatarModel ─── CommandInterpreter (closed vocabulary)
+    AvatarModel
+      ├── CommandInterpreter ── ActionGate ── clipboard demo
+      └── AppIdentity ── ResearchGate ── user-approved scope
+
+ResearchArtifact (untrusted) ── review ── CapabilityProfile
         │
         ▼
-     ActionGate ─── observe-only + emergency-stop + confirmation
-        │ allowed only
+ActionPlan ── ConsentGrant ── PlanValidator
+        │
         ▼
- AppKit executor ── clipboard write (only current capability)
+ExecutionContract ── foreground preflight ── adapter + audit
 ```
 
 `AvatarCore` has no AppKit dependency. UI and side-effect code live in the
-executable target. See [SECURITY.md](SECURITY.md) for capability requirements.
+executable target. See [SECURITY.md](SECURITY.md) and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for capability requirements.
 
 ## License
 

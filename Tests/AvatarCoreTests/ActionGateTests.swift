@@ -27,9 +27,10 @@ struct ActionGateTests {
         let state = SafetyState(observeOnly: false, emergencyStopped: true)
         let result = gate.evaluate(action, state: state, userConfirmed: true)
         #expect(
-            result == .denied(
-                reason: "Emergency stop is active. Resume manually before any action."
-            )
+            result
+                == .denied(
+                    reason: "Emergency stop is active. Resume manually before any action."
+                )
         )
     }
 
