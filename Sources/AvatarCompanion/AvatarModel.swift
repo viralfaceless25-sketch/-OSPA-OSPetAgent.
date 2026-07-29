@@ -27,6 +27,19 @@ final class AvatarModel: ObservableObject {
         "Executable app commands: “open Safari” or “switch to Notes”."
     @Published private(set) var applicationAuditEvents: [AuditEvent] = []
     @Published var isExecutingApplicationAction = false
+    @Published var isSearchPresented = false
+    @Published var searchQuery = ""
+    @Published var draftSearchScopes: Set<LocalSearchScopeID> = [.applications]
+    @Published private(set) var searchAuthorization: LocalSearchAuthorization?
+    @Published private(set) var searchCandidates: [LocalSearchCandidate] = []
+    @Published var searchStatus =
+        "Open search, review metadata scope, then approve this session."
+    @Published var spotlightOpenPreview: SpotlightOpenPreview?
+    @Published var pendingLocalItemOpenPlan: LocalItemOpenPlan?
+    @Published var localItemActionStatus =
+        "No file or folder action is pending."
+    @Published private(set) var localItemAuditEvents: [AuditEvent] = []
+    @Published var isExecutingLocalItemAction = false
 
     var onExpansionChanged: ((Bool) -> Void)?
     var onHide: (() -> Void)?
@@ -41,14 +54,187 @@ final class AvatarModel: ObservableObject {
     private let applicationResolver = InstalledApplicationResolver()
     private let applicationPlanner = ApplicationActionPlanner()
     private let nativeApplicationExecutor = NativeApplicationExecutor()
+    private let metadataSearch = LocalMetadataSearchService()
+    private let nativeLocalItemExecutor = NativeLocalItemExecutor()
+    private let searchRanker = LocalSearchRanker()
+    private let searchScopePolicy = LocalSearchScopePolicy()
     private var consumedConsentGrantIDs = Set<UUID>()
+    private var indexedApplications: [ResolvedApplication] = []
+    private var personalSearchItems: [LocalSearchItem] = []
 
     func toggleExpanded() {
         isExpanded.toggle()
         onExpansionChanged?(isExpanded)
     }
 
+    func openSearch() {
+        if !isExpanded {
+            toggleExpanded()
+        }
+        spotlightOpenPreview = nil
+        pendingLocalItemOpenPlan = nil
+        isSearchPresented = true
+        searchQuery = ""
+        draftSearchScopes = [.applications]
+        searchAuthorization = nil
+        searchCandidates = []
+        personalSearchItems = []
+        searchStatus =
+            "Applications metadata only. Add personal scopes if wanted, then approve for 15 minutes."
+    }
+
+    func closeSearch() {
+        isSearchPresented = false
+        metadataSearch.cancel()
+    }
+
+    func setDraftSearchScope(
+        _ scope: LocalSearchScopeID,
+        enabled: Bool
+    ) {
+        guard scope != .applications else { return }
+        if enabled {
+            draftSearchScopes.insert(scope)
+        } else {
+            draftSearchScopes.remove(scope)
+        }
+        searchAuthorization = nil
+        searchCandidates = []
+        personalSearchItems = []
+        metadataSearch.cancel()
+        searchStatus =
+            "Scope changed. Review and approve it before searching."
+    }
+
+    func approveSearchScopes() {
+        do {
+            searchAuthorization = try searchScopePolicy.authorize(
+                scopes: draftSearchScopes,
+                userApproved: true,
+                now: Date()
+            )
+            searchStatus =
+                "Approved metadata scopes for 15 minutes. Indexing application bundles…"
+            applicationResolver.loadIndex { [weak self] applications, complete in
+                guard let self else { return }
+                self.indexedApplications = applications
+                self.updateSearchResults()
+                if self.searchQuery.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                ).isEmpty {
+                    self.searchStatus =
+                        complete
+                        ? "Ready. Search exact names across approved metadata scopes."
+                        : "Applications ready; registered app metadata is still loading."
+                }
+            }
+        } catch {
+            searchAuthorization = nil
+            searchStatus = "Search scope approval failed."
+        }
+    }
+
+    func updateSearchQuery(_ query: String) {
+        searchQuery = query
+        personalSearchItems = []
+        updateSearchResults()
+
+        guard let authorization = validSearchAuthorization() else {
+            metadataSearch.cancel()
+            return
+        }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let personalScopes = authorization.approvedScopes.filter(\.isPersonal)
+        guard trimmed.count >= 2, !personalScopes.isEmpty else {
+            metadataSearch.cancel()
+            if !personalScopes.isEmpty, !trimmed.isEmpty {
+                searchStatus =
+                    "Enter at least two characters before personal metadata search."
+            }
+            return
+        }
+
+        searchStatus = "Searching matching names in approved metadata scopes…"
+        metadataSearch.search(
+            nameQuery: trimmed,
+            approvedScopes: authorization.approvedScopes
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case let .success(items):
+                self.personalSearchItems = items
+                self.updateSearchResults()
+                self.searchStatus =
+                    "Found \(self.searchCandidates.count) ranked exact local candidates."
+            case .failure(.queryTooShort):
+                self.searchStatus =
+                    "Enter at least two characters before personal metadata search."
+            case .failure(.noPersonalScope):
+                self.searchStatus =
+                    "Only application bundle metadata is approved."
+            case .failure:
+                self.searchStatus =
+                    "macOS could not read that approved metadata scope. No broader scan was attempted."
+            }
+        }
+    }
+
+    func selectSearchCandidate(_ candidate: LocalSearchCandidate) {
+        guard let authorization = validSearchAuthorization() else { return }
+        do {
+            try searchScopePolicy.validate(
+                item: candidate.item,
+                authorization: authorization,
+                now: Date()
+            )
+        } catch {
+            searchStatus = "Search approval expired or does not cover that result."
+            return
+        }
+
+        spotlightOpenPreview = SpotlightOpenPreview(item: candidate.item)
+        previewedAction = nil
+        computerUsePreview = nil
+        pendingApplicationProposal = nil
+        applicationProposalExpiresAt = nil
+        pendingLocalItemOpenPlan = nil
+
+        if candidate.item.kind == .application,
+            let application = indexedApplications.first(where: {
+                $0.applicationURL.standardizedFileURL
+                    == candidate.item.url.standardizedFileURL
+            })
+        {
+            let command = ParsedApplicationCommand(
+                operation: .launchOrActivate,
+                requestedApplicationName:
+                    application.identity.displayName
+            )
+            prepareApplicationProposal(
+                command,
+                application: application
+            )
+        } else {
+            let now = Date()
+            pendingLocalItemOpenPlan = LocalItemOpenPlan(
+                item: candidate.item,
+                createdAt: now,
+                expiresAt: now.addingTimeInterval(60)
+            )
+            localItemActionStatus =
+                "Native exact-item fallback ready for separate confirmation."
+            status =
+                "Selected exact \(candidate.item.kind.rawValue). Review both routes below."
+        }
+        isSearchPresented = false
+        searchStatus =
+            "Selected exact result \(candidate.item.name). No action ran."
+    }
+
     func previewCommand() {
+        spotlightOpenPreview = nil
+        pendingLocalItemOpenPlan = nil
+
         switch applicationCommandParser.parse(command) {
         case let .command(parsed):
             previewApplicationCommand(parsed)
@@ -120,8 +306,18 @@ final class AvatarModel: ObservableObject {
         computerUsePreview = nil
         pendingApplicationProposal = nil
         applicationProposalExpiresAt = nil
+        pendingLocalItemOpenPlan = nil
+        spotlightOpenPreview = nil
+        searchAuthorization = nil
+        searchCandidates = []
+        personalSearchItems = []
+        isSearchPresented = false
+        searchQuery = ""
+        metadataSearch.cancel()
         command = ""
         applicationActionStatus = "Emergency stop active. Pending app action cleared."
+        localItemActionStatus =
+            "Emergency stop active. Pending local item action cleared."
         status = "Stopped. All actions blocked."
     }
 
@@ -233,7 +429,8 @@ final class AvatarModel: ObservableObject {
         }
         do {
             let currentApplication = try applicationResolver.resolveExact(
-                named: proposal.command.requestedApplicationName
+                url: proposal.application.applicationURL,
+                identity: proposal.application.identity
             )
             guard currentApplication.identity == proposal.application.identity else {
                 applicationActionStatus =
@@ -333,6 +530,110 @@ final class AvatarModel: ObservableObject {
         }
     }
 
+    func confirmLocalItemAction() {
+        guard
+            let plan = pendingLocalItemOpenPlan,
+            let authorization = searchAuthorization
+        else {
+            localItemActionStatus = "Select one exact file or folder first."
+            return
+        }
+
+        let now = Date()
+        let consent = ConsentGrant(
+            planID: plan.id,
+            scopes: [],
+            approvedAt: now,
+            expiresAt: now.addingTimeInterval(30),
+            oneShot: true
+        )
+        do {
+            let validated = try LocalItemOpenValidator().validate(
+                plan: plan,
+                authorization: authorization,
+                consent: consent,
+                safety: safety,
+                userConfirmedPreview: true,
+                now: now
+            )
+            guard consumedConsentGrantIDs.insert(consent.id).inserted else {
+                localItemActionStatus = "One-shot consent was already used."
+                return
+            }
+            let contract = LocalItemOpenExecutionContract(
+                validated: validated,
+                issuedAt: now,
+                expiresAt: consent.expiresAt
+            )
+            localItemAuditEvents.append(
+                AuditEvent(
+                    contractID: contract.id,
+                    planID: plan.id,
+                    timestamp: now,
+                    outcome: .started
+                )
+            )
+            pendingLocalItemOpenPlan = nil
+            isExecutingLocalItemAction = true
+            localItemActionStatus =
+                "macOS is opening one exact local item. No input events are generated."
+
+            nativeLocalItemExecutor.execute(
+                contract: contract,
+                emergencyStopped: safety.emergencyStopped
+            ) { [weak self] outcome in
+                guard let self else { return }
+                self.isExecutingLocalItemAction = false
+                let auditOutcome: ExecutionOutcome
+                switch outcome {
+                case .succeeded:
+                    auditOutcome = .succeeded
+                    self.localItemActionStatus =
+                        "\(plan.item.name) is now opening."
+                case .blocked:
+                    auditOutcome = .denied("Local item action denied.")
+                    self.localItemActionStatus =
+                        "Emergency stop blocked the action."
+                case .expired:
+                    auditOutcome = .denied("Local item contract expired.")
+                    self.localItemActionStatus =
+                        "Confirmation expired. Select the result again."
+                case .targetChanged:
+                    auditOutcome = .denied("Local item identity changed.")
+                    self.localItemActionStatus =
+                        "Item moved or changed. Search and select it again."
+                case .failed:
+                    auditOutcome = .failed("Local item open failed.")
+                    self.localItemActionStatus =
+                        "macOS could not open that exact item."
+                }
+                self.localItemAuditEvents.append(
+                    AuditEvent(
+                        contractID: contract.id,
+                        planID: plan.id,
+                        timestamp: Date(),
+                        outcome: auditOutcome
+                    )
+                )
+            }
+        } catch LocalItemOpenValidationError.observeOnly {
+            localItemActionStatus =
+                "Observe-only mode blocks execution. Turn it off, then confirm again."
+        } catch LocalItemOpenValidationError.emergencyStopped {
+            localItemActionStatus = "Emergency stop blocks execution."
+        } catch LocalItemOpenValidationError.expired,
+            LocalSearchAuthorizationError.expired
+        {
+            pendingLocalItemOpenPlan = nil
+            localItemActionStatus =
+                "Search or action approval expired. Search again."
+        } catch {
+            pendingLocalItemOpenPlan = nil
+            localItemActionStatus =
+                "Exact-item preflight changed. Search and select again."
+        }
+    }
+
     func buildPreviewOnlyComputerUsePlan() {
         guard let app = discoveredApp else {
             discoveryStatus = "Identify an app before building a preview."
@@ -391,31 +692,7 @@ final class AvatarModel: ObservableObject {
             let application = try applicationResolver.resolveExact(
                 named: parsed.requestedApplicationName
             )
-            let proposal = try applicationPlanner.propose(
-                command: parsed,
-                application: application,
-                now: Date()
-            )
-            let previewConsent = ConsentGrant(
-                planID: proposal.plan.id,
-                scopes: [],
-                approvedAt: Date(),
-                expiresAt: Date().addingTimeInterval(60)
-            )
-            _ = try PlanValidator().validateForPreview(
-                plan: proposal.plan,
-                profile: proposal.profile,
-                consent: previewConsent,
-                userConfirmedPreview: true,
-                now: Date()
-            )
-
-            pendingApplicationProposal = proposal
-            applicationProposalExpiresAt = Date().addingTimeInterval(60)
-            status =
-                "Executable native app action prepared. Review exact target and confirm separately."
-            applicationActionStatus =
-                "Ready for one explicit confirmation. No Accessibility permission is required."
+            prepareApplicationProposal(parsed, application: application)
         } catch InstalledApplicationResolutionError.notFound {
             pendingApplicationProposal = nil
             applicationProposalExpiresAt = nil
@@ -436,6 +713,95 @@ final class AvatarModel: ObservableObject {
             applicationProposalExpiresAt = nil
             status = "Application action could not be planned safely."
         }
+    }
+
+    private func prepareApplicationProposal(
+        _ command: ParsedApplicationCommand,
+        application: ResolvedApplication
+    ) {
+        do {
+            let now = Date()
+            let proposal = try applicationPlanner.propose(
+                command: command,
+                application: application,
+                now: now
+            )
+            let previewConsent = ConsentGrant(
+                planID: proposal.plan.id,
+                scopes: [],
+                approvedAt: now,
+                expiresAt: now.addingTimeInterval(60)
+            )
+            _ = try PlanValidator().validateForPreview(
+                plan: proposal.plan,
+                profile: proposal.profile,
+                consent: previewConsent,
+                userConfirmedPreview: true,
+                now: now
+            )
+
+            pendingApplicationProposal = proposal
+            applicationProposalExpiresAt = now.addingTimeInterval(60)
+            status =
+                "Executable native app action prepared. Review exact target and confirm separately."
+            applicationActionStatus =
+                "Ready for one explicit confirmation. No Accessibility permission is required."
+        } catch ApplicationProposalError.switchTargetNotRunning {
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            status =
+                "Switch requires an already-running app. Use “open \(command.requestedApplicationName)” instead."
+        } catch {
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            status = "Application action could not be planned safely."
+        }
+    }
+
+    private func updateSearchResults() {
+        guard validSearchAuthorization() != nil else {
+            searchCandidates = []
+            return
+        }
+        let applications = indexedApplications.map {
+            LocalSearchItem(
+                name: $0.identity.displayName,
+                url: $0.applicationURL,
+                kind: .application,
+                scope: .applications,
+                bundleIdentifier: $0.identity.bundleIdentifier,
+                isRunning: $0.isRunning
+            )
+        }
+        searchCandidates = searchRanker.search(
+            query: searchQuery,
+            items: applications + personalSearchItems,
+            limit: 12
+        )
+        let trimmed = searchQuery.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        if !trimmed.isEmpty {
+            searchStatus =
+                searchCandidates.isEmpty
+                ? "No approved local metadata name matches “\(trimmed)”. No website, URL, or broader scope will be guessed."
+                : "Found \(searchCandidates.count) ranked exact local candidates."
+        }
+    }
+
+    private func validSearchAuthorization() -> LocalSearchAuthorization? {
+        guard let authorization = searchAuthorization else {
+            searchStatus = "Review and approve metadata scope before searching."
+            return nil
+        }
+        guard Date() < authorization.expiresAt else {
+            searchAuthorization = nil
+            searchCandidates = []
+            personalSearchItems = []
+            searchStatus = "Search scope approval expired. Approve it again."
+            return nil
+        }
+        return authorization
     }
 
     private func buildPreview(for intent: ComposedForegroundIntent) {

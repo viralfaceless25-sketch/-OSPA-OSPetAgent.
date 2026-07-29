@@ -28,12 +28,16 @@ planning, consent, and audit contracts without enabling live automation.
 - In-memory redacted preview audit records
 - Exact-name native app launch and foreground switching
 - Separate executable-action card with per-action confirmation and audit
+- Spotlight-style ranked local name search with exact-result selection
+- Discoverable native, Safari web-app, and Chrome web-app bundles
+- Explicit 15-minute Desktop/Documents/Downloads metadata scopes
+- Preview-only visible Command-Space plan plus confirmed native exact-item fallback
 
 No credentials, screen capture, accessibility-element inspection, input generation,
-user-document access, network fetch, shell, AppleScript, or global keyboard
-monitoring are used. App resolution reads bundle metadata only from running apps
-and standard macOS Applications folders. Accessibility is checked or requested only
-after selecting the corresponding button.
+file-content reads, network fetch, shell, AppleScript, or global keyboard monitoring
+are used. Search reads only local name/path/type metadata from user-approved scopes.
+Accessibility is checked or requested only after selecting the corresponding
+button.
 
 ## Requirements
 
@@ -117,8 +121,8 @@ focus Finder
 ```
 
 1. Enter one command and select **Preview**.
-2. Confirm the green card says **Executable native app action** and review exact
-   app name, bundle ID, effect, mechanism, and 60-second preview expiry.
+2. Confirm the green card says **Executable native exact-app fallback** and review
+   exact app name, bundle ID, effect, mechanism, and 60-second preview expiry.
 3. Turn off **Observe only**.
 4. Select **Confirm open** or **Confirm switch**.
 
@@ -127,6 +131,34 @@ already-running app; `open` launches or activates. Resolution accepts no paths,
 `.app` suffixes, multiple targets, documents, URLs, or fuzzy names. Execution uses
 native `NSWorkspace`/`NSRunningApplication` activation and needs no Accessibility
 permission. Started/result audit events contain generated IDs and redacted outcome.
+
+## Search this Mac
+
+1. Select **Search this Mac** or the same menu-bar command.
+2. Review scope. Applications is required. Desktop, Documents, and Downloads are
+   off until individually selected.
+3. Select **Approve scope for 15 minutes**.
+4. Type at least two characters, such as `net`.
+5. Select one ranked exact result. Selection does not open anything.
+6. Review the purple visible Command-Space plan and exact name, type, and path.
+7. To use the current native fallback, review the green card, turn off
+   **Observe only**, then confirm once.
+
+Application search combines running apps, standard system/local/user Application
+folders, and the local Spotlight application-bundle catalog. Native `APPL` bundles
+and Safari `AAPL` web-app bundles are accepted; discoverable Chrome web apps use
+normal application bundles. Personal search is query-scoped: matching filename,
+path, and type metadata only within approved Desktop/Documents/Downloads roots.
+It does not pre-index personal names, read file contents, traverse hidden items or
+package internals, inspect browser profiles/history, search the network, or guess a
+website/URL when no local result exists.
+
+The purple route documents intended foreground behavior: invoke macOS Spotlight
+with Command-Space, enter the selected name, verify exact result, then open. It is
+deliberately non-executable because this build cannot inspect Spotlight results or
+send Accessibility input safely. The green fallback uses macOS workspace services
+to open only the selected URL; it is separately previewed, expiring, confirmed,
+and audited. Avatar Companion does not replace or capture macOS Command-Space.
 
 ## Architecture
 
@@ -160,6 +192,11 @@ Exact app command ── installed-app metadata catalog ── green preview
         │ separate confirmation + action mode
         ▼
 ExecutionContract ── native NSWorkspace activation ── redacted audit
+
+Approved search scope ── local name metadata ── ranked candidates
+        │ exact selection
+        ├── purple Command-Space route ── preview only
+        └── green exact-item fallback ── one-shot consent + redacted audit
 ```
 
 `AvatarCore` has no AppKit dependency. UI and side-effect code live in the
@@ -172,8 +209,8 @@ Real computer use requires a later, separately reviewed executable adapter plus 
 of these user actions: grant macOS Accessibility permission, disable observe-only,
 review an evidence-backed capability profile, approve an exact expiring plan, and
 confirm meaningful effects. Current build cannot generate keyboard or mouse events
-even when Accessibility permission is granted. Its only foreground app execution
-is exact-name native launch/activation.
+even when Accessibility permission is granted. Current opening execution uses only
+the separately confirmed native exact-item fallback.
 
 ## License
 

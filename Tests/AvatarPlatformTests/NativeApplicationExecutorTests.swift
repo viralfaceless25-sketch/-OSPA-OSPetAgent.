@@ -173,6 +173,177 @@ struct NativeApplicationExecutorTests {
     }
 }
 
+@Suite("Installed application metadata policy")
+struct InstalledApplicationMetadataPolicyTests {
+    @Test("Allows native and Safari web-app package types")
+    func supportedPackageTypes() {
+        #expect(InstalledApplicationResolver.isSupportedPackageType("APPL"))
+        #expect(InstalledApplicationResolver.isSupportedPackageType("AAPL"))
+    }
+
+    @Test("Rejects non-application bundles")
+    func rejectsOtherPackageTypes() {
+        #expect(!InstalledApplicationResolver.isSupportedPackageType("BNDL"))
+        #expect(!InstalledApplicationResolver.isSupportedPackageType(nil))
+    }
+
+    @Test("Metadata search keeps results inside an approved root")
+    func metadataScopeContainment() {
+        let root = URL(fileURLWithPath: "/Users/example/Documents")
+
+        #expect(
+            LocalMetadataSearchService.isSafelyWithin(
+                URL(fileURLWithPath: "/Users/example/Documents/Report.pdf"),
+                root: root
+            )
+        )
+        #expect(
+            !LocalMetadataSearchService.isSafelyWithin(
+                URL(
+                    fileURLWithPath:
+                        "/Users/example/Documents-Archive/Report.pdf"
+                ),
+                root: root
+            )
+        )
+    }
+
+    @Test("Metadata search excludes hidden and package internals")
+    func metadataPrivacyExclusions() {
+        #expect(
+            LocalMetadataSearchService.isExcludedPath(
+                URL(fileURLWithPath: "/Users/example/Documents/.secret")
+            )
+        )
+        #expect(
+            LocalMetadataSearchService.isExcludedPath(
+                URL(
+                    fileURLWithPath:
+                        "/Users/example/Documents/Photos.photoslibrary/private.db"
+                )
+            )
+        )
+        #expect(
+            !LocalMetadataSearchService.isExcludedPath(
+                URL(fileURLWithPath: "/Users/example/Documents/Report.pdf")
+            )
+        )
+    }
+
+    @Test("Metadata query cannot turn wildcard input into a broad scan")
+    func metadataPatternEscaping() {
+        #expect(
+            LocalMetadataSearchService.metadataNamePattern(for: "*?") == nil
+        )
+        #expect(
+            LocalMetadataSearchService.metadataNamePattern(for: "ne*")
+                == "*ne\\**"
+        )
+    }
+}
+
+@Suite("Native exact-item fallback")
+@MainActor
+struct NativeLocalItemExecutorTests {
+    @Test("Exact validated URL is the only open request")
+    func opensExactURL() throws {
+        let workspace = FakeLocalItemWorkspace(state: .file)
+        let executor = NativeLocalItemExecutor(workspace: workspace)
+        let contract = try makeLocalItemContract()
+        var outcome: NativeLocalItemExecutionOutcome?
+
+        executor.execute(
+            contract: contract,
+            emergencyStopped: false
+        ) {
+            outcome = $0
+        }
+
+        #expect(outcome == .succeeded)
+        #expect(workspace.openedURLs == [contract.validated.plan.item.url])
+    }
+
+    @Test("Stop, expiry, and identity drift prevent open")
+    func preflightBlocks() throws {
+        let stoppedWorkspace = FakeLocalItemWorkspace(state: .file)
+        var stoppedOutcome: NativeLocalItemExecutionOutcome?
+        NativeLocalItemExecutor(workspace: stoppedWorkspace).execute(
+            contract: try makeLocalItemContract(),
+            emergencyStopped: true
+        ) {
+            stoppedOutcome = $0
+        }
+        #expect(stoppedOutcome == .blocked)
+        #expect(stoppedWorkspace.openedURLs.isEmpty)
+
+        let expiredWorkspace = FakeLocalItemWorkspace(state: .file)
+        var expiredOutcome: NativeLocalItemExecutionOutcome?
+        NativeLocalItemExecutor(workspace: expiredWorkspace).execute(
+            contract: try makeLocalItemContract(
+                contractExpiry: .distantPast
+            ),
+            emergencyStopped: false
+        ) {
+            expiredOutcome = $0
+        }
+        #expect(expiredOutcome == .expired)
+        #expect(expiredWorkspace.openedURLs.isEmpty)
+
+        let changedWorkspace = FakeLocalItemWorkspace(state: .folder)
+        var changedOutcome: NativeLocalItemExecutionOutcome?
+        NativeLocalItemExecutor(workspace: changedWorkspace).execute(
+            contract: try makeLocalItemContract(),
+            emergencyStopped: false
+        ) {
+            changedOutcome = $0
+        }
+        #expect(changedOutcome == .targetChanged)
+        #expect(changedWorkspace.openedURLs.isEmpty)
+    }
+
+    private func makeLocalItemContract(
+        contractExpiry: Date = .distantFuture
+    ) throws -> LocalItemOpenExecutionContract {
+        let now = Date()
+        let item = LocalSearchItem(
+            name: "Report.pdf",
+            url: URL(fileURLWithPath: "/Users/example/Documents/Report.pdf"),
+            kind: .file,
+            scope: .documents
+        )
+        let plan = LocalItemOpenPlan(
+            item: item,
+            createdAt: now,
+            expiresAt: .distantFuture
+        )
+        let authorization = try LocalSearchScopePolicy().authorize(
+            scopes: [.applications, .documents],
+            userApproved: true,
+            now: now,
+            duration: 3_600
+        )
+        let consent = ConsentGrant(
+            planID: plan.id,
+            scopes: [],
+            approvedAt: now,
+            expiresAt: .distantFuture
+        )
+        let validated = try LocalItemOpenValidator().validate(
+            plan: plan,
+            authorization: authorization,
+            consent: consent,
+            safety: SafetyState(observeOnly: false),
+            userConfirmedPreview: true,
+            now: now
+        )
+        return LocalItemOpenExecutionContract(
+            validated: validated,
+            issuedAt: now,
+            expiresAt: contractExpiry
+        )
+    }
+}
+
 @MainActor
 private final class FakeWorkspace: NativeApplicationWorkspace {
     private let result: NativeWorkspaceActionResult
@@ -196,5 +367,32 @@ private final class FakeWorkspace: NativeApplicationWorkspace {
     ) {
         launchedURLs.append(url)
         completion(result)
+    }
+}
+
+@MainActor
+private final class FakeLocalItemWorkspace: NativeLocalItemWorkspace {
+    private let itemState: NativeLocalItemState
+    private let openSucceeds: Bool
+    private(set) var openedURLs: [URL] = []
+
+    init(
+        state: NativeLocalItemState,
+        openSucceeds: Bool = true
+    ) {
+        self.itemState = state
+        self.openSucceeds = openSucceeds
+    }
+
+    func state(at url: URL) -> NativeLocalItemState {
+        itemState
+    }
+
+    func open(
+        _ url: URL,
+        completion: @escaping @MainActor (Bool) -> Void
+    ) {
+        openedURLs.append(url)
+        completion(openSucceeds)
     }
 }

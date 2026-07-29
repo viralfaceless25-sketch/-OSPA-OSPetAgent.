@@ -8,10 +8,15 @@ public enum InstalledApplicationResolutionError: Error, Equatable {
 }
 
 @MainActor
-public final class InstalledApplicationResolver {
+public final class InstalledApplicationResolver: NSObject {
     private var cachedInstalledApplications: [ResolvedApplication]?
+    private var metadataQuery: NSMetadataQuery?
+    private var metadataCompletion: (@MainActor ([ResolvedApplication], Bool) -> Void)?
+    private var metadataIndexComplete = false
 
-    public init() {}
+    public override init() {
+        super.init()
+    }
 
     public func resolveExact(
         named requestedName: String
@@ -34,6 +39,62 @@ public final class InstalledApplicationResolver {
             applicationURL: match.applicationURL,
             isRunning: running
         )
+    }
+
+    public func resolveExact(
+        url expectedURL: URL,
+        identity expectedIdentity: AppIdentity
+    ) throws -> ResolvedApplication {
+        guard
+            let match = applicationsWithCurrentRunningState().first(where: {
+                $0.applicationURL.standardizedFileURL
+                    == expectedURL.standardizedFileURL
+                    && $0.identity == expectedIdentity
+            })
+        else {
+            throw InstalledApplicationResolutionError.notFound
+        }
+        return match
+    }
+
+    /// Returns standard/running apps immediately, then registered Spotlight apps.
+    public func loadIndex(
+        refresh: Bool = false,
+        completion:
+            @escaping @MainActor ([ResolvedApplication], Bool) -> Void
+    ) {
+        if refresh {
+            cachedInstalledApplications = nil
+            metadataIndexComplete = false
+        }
+
+        completion(
+            applicationsWithCurrentRunningState(),
+            metadataIndexComplete
+        )
+        guard !metadataIndexComplete, metadataQuery == nil else { return }
+
+        metadataCompletion = completion
+        let query = NSMetadataQuery()
+        query.predicate = NSPredicate(
+            format: "%K == %@",
+            "kMDItemContentType",
+            "com.apple.application-bundle"
+        )
+        query.searchScopes = [NSMetadataQueryLocalComputerScope]
+        query.valueListAttributes = ["kMDItemPath"]
+        metadataQuery = query
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(metadataQueryDidFinish(_:)),
+            name: .NSMetadataQueryDidFinishGathering,
+            object: query
+        )
+        query.start()
+    }
+
+    public func currentIndex() -> [ResolvedApplication] {
+        applicationsWithCurrentRunningState()
     }
 
     private func installedApplications() -> [ResolvedApplication] {
@@ -87,17 +148,77 @@ public final class InstalledApplicationResolver {
         return applications
     }
 
+    private func applicationsWithCurrentRunningState()
+        -> [ResolvedApplication]
+    {
+        let runningBundleIdentifiers = Set(
+            NSWorkspace.shared.runningApplications.compactMap(
+                \.bundleIdentifier
+            )
+        )
+        return installedApplications().map { application in
+            ResolvedApplication(
+                identity: application.identity,
+                applicationURL: application.applicationURL,
+                isRunning: runningBundleIdentifiers.contains(
+                    application.identity.bundleIdentifier
+                )
+            )
+        }
+    }
+
+    @objc private func metadataQueryDidFinish(
+        _ notification: Notification
+    ) {
+        guard
+            let query = notification.object as? NSMetadataQuery,
+            query === metadataQuery
+        else {
+            return
+        }
+
+        query.disableUpdates()
+        var urls = Set(
+            installedApplications().map {
+                $0.applicationURL.standardizedFileURL
+            }
+        )
+        for case let item as NSMetadataItem in query.results {
+            if let path = item.value(
+                forAttribute: "kMDItemPath"
+            ) as? String {
+                urls.insert(
+                    URL(fileURLWithPath: path).standardizedFileURL
+                )
+            }
+        }
+
+        cachedInstalledApplications = urls.compactMap(application(at:))
+        metadataIndexComplete = true
+        query.stop()
+        NotificationCenter.default.removeObserver(
+            self,
+            name: .NSMetadataQueryDidFinishGathering,
+            object: query
+        )
+        metadataQuery = nil
+
+        let completion = metadataCompletion
+        metadataCompletion = nil
+        completion?(applicationsWithCurrentRunningState(), true)
+    }
+
     private func application(at url: URL) -> ResolvedApplication? {
         guard let bundle = Bundle(url: url),
             let bundleIdentifier = bundle.bundleIdentifier
         else {
             return nil
         }
-        if let packageType = bundle.object(
-            forInfoDictionaryKey: "CFBundlePackageType"
-        ) as? String,
-            packageType != "APPL"
-        {
+        let packageType =
+            bundle.object(
+                forInfoDictionaryKey: "CFBundlePackageType"
+            ) as? String
+        guard Self.isSupportedPackageType(packageType) else {
             return nil
         }
 
@@ -124,5 +245,9 @@ public final class InstalledApplicationResolver {
         value
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    nonisolated static func isSupportedPackageType(_ value: String?) -> Bool {
+        value == "APPL" || value == "AAPL"
     }
 }

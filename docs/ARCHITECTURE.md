@@ -47,6 +47,13 @@ Exact app name ── standard app catalog ── ApplicationActionProposal
   │ action mode + separate confirmation
   ▼
 ExecutionContract ── NativeApplicationExecutor ── redacted AuditEvent
+
+Scope draft ── explicit 15-minute LocalSearchAuthorization
+  │ application metadata + query-scoped approved personal metadata
+  ▼
+LocalSearchRanker ── exact candidate selection
+  ├── SpotlightOpenPreview ── typed visible steps, never events
+  └── LocalItemOpenPlan ── one-shot consent ── native fallback + audit
 ```
 
 Every arrow is a code boundary. Web content cannot call tools, modify policy,
@@ -153,6 +160,52 @@ fuzzy names, duplicate exact names, multi-actions, and arbitrary Launch Services
 requests never enter the plan. The native executor contains no keyboard, pointer,
 Accessibility-element, browser, media, or scripting API.
 
+## Scoped Spotlight-style local search
+
+`LocalSearchScopePolicy` separates requested scope from authorization. Applications
+is always required; Desktop, Documents, and Downloads require visible opt-in.
+Authorization is in-memory and expires after 15 minutes.
+
+Application discovery uses three bounded metadata sources:
+
+1. Running application bundle URLs.
+2. Standard system, local, and user Application directories.
+3. `NSMetadataQuery` filtered to local application bundles.
+
+Only bundle path, display name, bundle identifier, package type, and running state
+cross into the index. `APPL` and `AAPL` package types cover native/Chrome-style
+apps and Safari web apps. No browser profile, history, shortcut database, or web
+request is used.
+
+Personal search does not build an ambient filename catalog.
+`LocalMetadataSearchService` starts only after scope approval and a query with two
+alphanumeric characters. It searches matching `kMDItemFSName` values inside the
+approved root URLs, caps retained results at 200 before UI ranking, and returns
+only name, path, item type, and source scope. Wildcards are escaped. Hidden paths,
+package internals, and results outside exact standardized roots are rejected.
+macOS privacy denial becomes a visible failure; scope is never broadened.
+
+`LocalSearchRanker` performs exact, prefix, word-prefix, contains, then subsequence
+name matching. It returns at most 12 candidates. A candidate cannot initialize an
+executor. User selection first binds one standardized URL and produces a
+`SpotlightOpenPreview`:
+
+1. Press Command-Space.
+2. Enter selected exact name.
+3. Verify highlighted name, kind, and location.
+4. Press Return.
+
+This route remains non-executable. Without Accessibility input plus exact
+Spotlight-result inspection, step 4 cannot be proven safe. The app does not capture
+or replace macOS Command-Space.
+
+`LocalItemOpenPlan` is a narrow native fallback for selected files and folders.
+`LocalItemOpenValidator` requires current scope authorization, action mode,
+unexpired plan and consent, empty macOS permission scope, and explicit
+confirmation. `NativeLocalItemExecutor` rechecks path existence/type, asks Launch
+Services for the registered handler, and opens that exact URL with recent items
+disabled. Started/terminal audits omit the path and raw error detail.
+
 ## Research boundary
 
 Research uses a two-stage approval model:
@@ -189,6 +242,8 @@ The avatar can identify the foreground app, stage an official documentation
 research scope, show exact limits, record explicit approval, check/request macOS
 Accessibility trust, compose three local foreground intents, and render a scoped
 illustrative plan. It can also launch or foreground one exactly named local app
-after a separate confirmation. Network/LLM requests, voice, screen/accessibility-
+after a separate confirmation. It can search approved local name metadata, bind one
+exact result, preview the intended visible Command-Space route, and use a confirmed
+native exact-item fallback. Network/LLM requests, voice, screen/accessibility-
 element inspection, clicks, typing, media, and generic action generation remain
 disabled.

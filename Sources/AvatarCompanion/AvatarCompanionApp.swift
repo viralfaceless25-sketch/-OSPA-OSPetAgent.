@@ -41,6 +41,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         let menu = NSMenu()
+        let search = NSMenuItem(
+            title: "Search This Mac…",
+            action: #selector(openSearch),
+            keyEquivalent: ""
+        )
+        search.target = self
+        menu.addItem(search)
+
         let toggle = NSMenuItem(
             title: "Show or Hide Avatar",
             action: #selector(togglePanel),
@@ -73,6 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func togglePanel() {
         panelController?.toggleVisibility()
+    }
+
+    @objc private func openSearch() {
+        model.openSearch()
+        panelController?.show()
     }
 
     @objc private func emergencyStop() {

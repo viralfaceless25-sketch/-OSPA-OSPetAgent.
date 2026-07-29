@@ -103,6 +103,38 @@ macOS Accessibility permission is process-wide. Future computer-use code must ap
 stricter internal per-app targeting on every step. OS permission alone is never
 treated as consent.
 
+## Milestone 6 scoped local search
+
+- Search begins with a visible scope review and explicit 15-minute authorization.
+- Applications is required. Desktop, Documents, and Downloads remain off until the
+  user selects each scope.
+- Application discovery merges running apps, standard Application folders, and a
+  local Spotlight application-bundle metadata query.
+- Native `APPL` and Safari web-app `AAPL` bundles are allowed. Other bundle package
+  types are rejected.
+- Personal locations are searched only after a query with at least two
+  alphanumeric characters. Wildcard metacharacters are escaped.
+- Personal search requests filename matches from macOS metadata. It stores only the
+  result name, exact path, item type, and approved source scope in memory.
+- Search excludes hidden paths and common package internals. It does not read file
+  contents, browser data, credentials, arbitrary roots, or network results.
+- Results are ranked locally by normalized name only. Query text cannot become an
+  action.
+- Selecting one candidate binds exact URL, type, and scope. Selection itself has no
+  side effect.
+- The visible Command-Space route is a typed, non-executable preview. Keyboard
+  injection and Spotlight-result inspection remain absent.
+- Native exact-item opening is only a fallback. It requires action mode, a
+  60-second preview, separate confirmation, a 30-second one-shot consent contract,
+  exact scope revalidation, existence/type preflight, and redacted audit.
+- A missing local result never becomes a guessed website, URL, browser search, or
+  broader filesystem scan.
+- Emergency stop clears search authorization, candidates, and pending opens.
+
+macOS owns Full Disk Access, Files and Folders, and Accessibility permissions.
+Avatar Companion neither bypasses denials nor silently widens scope when metadata
+is unavailable.
+
 ## Capability policy
 
 Future capability additions must:
