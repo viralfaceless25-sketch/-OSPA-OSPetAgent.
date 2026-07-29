@@ -32,6 +32,8 @@ planning, consent, and audit contracts without enabling live automation.
 - Discoverable native, Safari web-app, and Chrome web-app bundles
 - Explicit 15-minute Desktop/Documents/Downloads metadata scopes
 - Preview-only visible Command-Space plan plus confirmed native exact-item fallback
+- Deterministic ordered app plan with one confirmable lifecycle step
+- Explicitly deferred, non-executable app-specific follow-up goals
 
 No credentials, screen capture, accessibility-element inspection, input generation,
 file-content reads, network fetch, shell, AppleScript, or global keyboard monitoring
@@ -160,6 +162,33 @@ send Accessibility input safely. The green fallback uses macOS workspace service
 to open only the selected URL; it is separately previewed, expiring, confirmed,
 and audited. Avatar Companion does not replace or capture macOS Command-Space.
 
+## Preview a bounded multi-step request
+
+Enter:
+
+```text
+open Netflix and continue playing One Piece
+```
+
+The local deterministic parser renders:
+
+1. **Open Netflix** — exact installed app identity, available through the existing
+   green native fallback and separate confirmation.
+2. **Continue playing One Piece** — unsupported, non-executable, and not queued.
+
+Confirming step 1 authorizes only one app launch/focus action. Step 2 is not part of
+the executable `ActionPlan`, consent grant, execution contract, or audit payload.
+It would require a future foreground-computer-use adapter that can inspect visible
+app state, present exact UI steps, and obtain a new confirmation. Current code does
+not inspect Netflix, sign in, search its catalog, resume media, send input, or make
+network requests.
+
+The sequence parser recognizes one exact launch/focus clause followed by a bounded
+app goal. Known continue/resume-playing wording receives a precise deferred
+playback label. Other allowlisted goal verbs render as unsupported. A bare second
+application name remains rejected, so `open Safari and Notes` cannot become two
+actions.
+
 ## Architecture
 
 ```text
@@ -197,6 +226,10 @@ Approved search scope ── local name metadata ── ranked candidates
         │ exact selection
         ├── purple Command-Space route ── preview only
         └── green exact-item fallback ── one-shot consent + redacted audit
+
+Local sequence text ── exact app clause + deferred goal
+        ├── step 1 ── existing one-step native plan + confirmation
+        └── step 2 ── preview label only; unsupported and never queued
 ```
 
 `AvatarCore` has no AppKit dependency. UI and side-effect code live in the

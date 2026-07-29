@@ -24,9 +24,11 @@ final class AvatarModel: ObservableObject {
     @Published var pendingApplicationProposal: ApplicationActionProposal?
     @Published var applicationProposalExpiresAt: Date?
     @Published var applicationActionStatus =
-        "Executable app commands: “open Safari” or “switch to Notes”."
+        "Executable app commands: “open Safari” or “switch to Notes”. Follow-up goals preview only."
     @Published private(set) var applicationAuditEvents: [AuditEvent] = []
     @Published var isExecutingApplicationAction = false
+    @Published var pendingApplicationSequence: ApplicationSequenceProposal?
+    @Published var applicationSequenceFirstStepCompleted = false
     @Published var isSearchPresented = false
     @Published var searchQuery = ""
     @Published var draftSearchScopes: Set<LocalSearchScopeID> = [.applications]
@@ -51,8 +53,10 @@ final class AvatarModel: ObservableObject {
     private let previewAdapter = PreviewOnlyForegroundAdapter()
     private let foregroundComposer = ForegroundCommandComposer()
     private let applicationCommandParser = ApplicationCommandParser()
+    private let applicationSequenceParser = ApplicationSequenceParser()
     private let applicationResolver = InstalledApplicationResolver()
     private let applicationPlanner = ApplicationActionPlanner()
+    private let applicationSequencePlanner = ApplicationSequencePlanner()
     private let nativeApplicationExecutor = NativeApplicationExecutor()
     private let metadataSearch = LocalMetadataSearchService()
     private let nativeLocalItemExecutor = NativeLocalItemExecutor()
@@ -73,6 +77,8 @@ final class AvatarModel: ObservableObject {
         }
         spotlightOpenPreview = nil
         pendingLocalItemOpenPlan = nil
+        pendingApplicationSequence = nil
+        applicationSequenceFirstStepCompleted = false
         isSearchPresented = true
         searchQuery = ""
         draftSearchScopes = [.applications]
@@ -234,6 +240,22 @@ final class AvatarModel: ObservableObject {
     func previewCommand() {
         spotlightOpenPreview = nil
         pendingLocalItemOpenPlan = nil
+        pendingApplicationSequence = nil
+        applicationSequenceFirstStepCompleted = false
+
+        switch applicationSequenceParser.parse(command) {
+        case let .sequence(sequence):
+            previewApplicationSequence(sequence)
+            return
+        case let .rejected(reason):
+            previewedAction = nil
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            status = "Multi-step plan rejected: \(reason)"
+            return
+        case .notSequence:
+            break
+        }
 
         switch applicationCommandParser.parse(command) {
         case let .command(parsed):
@@ -253,7 +275,7 @@ final class AvatarModel: ObservableObject {
         case .help:
             previewedAction = nil
             status =
-                "Try “copy time”, “focus this app”, “preview save”, or “preview find”."
+                "Try “copy time”, “open Netflix and continue playing One Piece”, “focus this app”, or “preview save”."
         case .rejected:
             previewedAction = nil
             pendingApplicationProposal = nil
@@ -306,6 +328,8 @@ final class AvatarModel: ObservableObject {
         computerUsePreview = nil
         pendingApplicationProposal = nil
         applicationProposalExpiresAt = nil
+        pendingApplicationSequence = nil
+        applicationSequenceFirstStepCompleted = false
         pendingLocalItemOpenPlan = nil
         spotlightOpenPreview = nil
         searchAuthorization = nil
@@ -515,6 +539,20 @@ final class AvatarModel: ObservableObject {
                         appName:
                             executionProposal.application.identity.displayName
                     )
+                if self.pendingApplicationSequence?
+                    .applicationProposal.plan.id == proposal.plan.id
+                {
+                    if outcome == .succeeded {
+                        self.applicationSequenceFirstStepCompleted = true
+                        self.status =
+                            "Step 1 completed. Step 2 remains unsupported, was not attempted, and is not queued."
+                        self.applicationActionStatus +=
+                            " Deferred app goal was not attempted."
+                    } else {
+                        self.status =
+                            "Step 1 did not complete. Step 2 remains unsupported and was not attempted."
+                    }
+                }
             }
         } catch PlanValidationError.observeOnly {
             applicationActionStatus =
@@ -687,6 +725,8 @@ final class AvatarModel: ObservableObject {
     ) {
         previewedAction = nil
         computerUsePreview = nil
+        pendingApplicationSequence = nil
+        applicationSequenceFirstStepCompleted = false
 
         do {
             let application = try applicationResolver.resolveExact(
@@ -715,6 +755,56 @@ final class AvatarModel: ObservableObject {
         }
     }
 
+    private func previewApplicationSequence(
+        _ sequence: ParsedApplicationSequence
+    ) {
+        previewedAction = nil
+        computerUsePreview = nil
+
+        do {
+            let application = try applicationResolver.resolveExact(
+                named: sequence.firstCommand.requestedApplicationName
+            )
+            let proposal = try applicationSequencePlanner.propose(
+                sequence: sequence,
+                application: application,
+                now: Date()
+            )
+            try publishApplicationProposal(
+                proposal.applicationProposal
+            )
+            pendingApplicationSequence = proposal
+            applicationSequenceFirstStepCompleted = false
+            status =
+                "Ordered plan ready. Only step 1 can be confirmed now; step 2 is unsupported and not queued."
+            applicationActionStatus =
+                "One confirmation authorizes only the exact app launch/focus step."
+        } catch InstalledApplicationResolutionError.notFound {
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            pendingApplicationSequence = nil
+            status =
+                "No installed app found with that exact first-step name. Use Search this Mac to select it."
+        } catch InstalledApplicationResolutionError.ambiguousExactName {
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            pendingApplicationSequence = nil
+            status =
+                "Multiple apps share that first-step name. Select an exact result in Search this Mac."
+        } catch ApplicationProposalError.switchTargetNotRunning {
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            pendingApplicationSequence = nil
+            status =
+                "Step 1 switch requires a running app. Use “open \(sequence.firstCommand.requestedApplicationName) and …” instead."
+        } catch {
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            pendingApplicationSequence = nil
+            status = "The ordered app plan could not be prepared safely."
+        }
+    }
+
     private func prepareApplicationProposal(
         _ command: ParsedApplicationCommand,
         application: ResolvedApplication
@@ -726,22 +816,7 @@ final class AvatarModel: ObservableObject {
                 application: application,
                 now: now
             )
-            let previewConsent = ConsentGrant(
-                planID: proposal.plan.id,
-                scopes: [],
-                approvedAt: now,
-                expiresAt: now.addingTimeInterval(60)
-            )
-            _ = try PlanValidator().validateForPreview(
-                plan: proposal.plan,
-                profile: proposal.profile,
-                consent: previewConsent,
-                userConfirmedPreview: true,
-                now: now
-            )
-
-            pendingApplicationProposal = proposal
-            applicationProposalExpiresAt = now.addingTimeInterval(60)
+            try publishApplicationProposal(proposal, now: now)
             status =
                 "Executable native app action prepared. Review exact target and confirm separately."
             applicationActionStatus =
@@ -756,6 +831,28 @@ final class AvatarModel: ObservableObject {
             applicationProposalExpiresAt = nil
             status = "Application action could not be planned safely."
         }
+    }
+
+    private func publishApplicationProposal(
+        _ proposal: ApplicationActionProposal,
+        now: Date = Date()
+    ) throws {
+        let previewConsent = ConsentGrant(
+            planID: proposal.plan.id,
+            scopes: [],
+            approvedAt: now,
+            expiresAt: now.addingTimeInterval(60)
+        )
+        _ = try PlanValidator().validateForPreview(
+            plan: proposal.plan,
+            profile: proposal.profile,
+            consent: previewConsent,
+            userConfirmedPreview: true,
+            now: now
+        )
+
+        pendingApplicationProposal = proposal
+        applicationProposalExpiresAt = now.addingTimeInterval(60)
     }
 
     private func updateSearchResults() {

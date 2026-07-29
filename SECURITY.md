@@ -135,6 +135,30 @@ macOS owns Full Disk Access, Files and Folders, and Accessibility permissions.
 Avatar Companion neither bypasses denials nor silently widens scope when metadata
 is unavailable.
 
+## Milestone 7 bounded multi-step planning
+
+- `ApplicationSequenceParser` runs locally with no LLM or network request.
+- It splits one exact app launch/focus clause at the first `and` from one bounded
+  follow-up app goal.
+- The first clause must pass the existing closed `ApplicationCommandParser` and
+  exact installed-app resolver.
+- Known continue/resume-playing language becomes a typed deferred playback goal.
+  Other allowlisted app-goal verbs remain explicitly unsupported.
+- A bare second app name, empty goal, overlong goal, or control characters are
+  rejected.
+- `ApplicationSequencePlanner` renders two ordered steps, but only step 1 owns an
+  `ApplicationActionProposal`.
+- Step 2 never enters `ActionPlan`, `ConsentGrant`, `ExecutionContract`, native
+  executor, or audit. Its text is shown in-memory for user review only.
+- Confirming step 1 cannot queue, authorize, or trigger step 2.
+- Successful step 1 reports step 2 as unattempted. Failure, expiry, observe-only,
+  emergency stop, and identity drift preserve existing blocking behavior.
+- Emergency stop clears the entire sequence preview and pending step 1.
+
+No browser automation, Netflix/site login, catalog lookup, content playback, media
+control, screen/UI inspection, mouse/keyboard injection, voice, network/LLM, or
+arbitrary multi-action executor is added.
+
 ## Capability policy
 
 Future capability additions must:

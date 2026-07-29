@@ -54,6 +54,10 @@ Scope draft ── explicit 15-minute LocalSearchAuthorization
 LocalSearchRanker ── exact candidate selection
   ├── SpotlightOpenPreview ── typed visible steps, never events
   └── LocalItemOpenPlan ── one-shot consent ── native fallback + audit
+
+Command text with `and` ── ApplicationSequenceParser
+  ├── exact first app clause ── existing one-step executable contract
+  └── typed deferred goal ── ordered preview only; no authority
 ```
 
 Every arrow is a code boundary. Web content cannot call tools, modify policy,
@@ -206,6 +210,32 @@ confirmation. `NativeLocalItemExecutor` rechecks path existence/type, asks Launc
 Services for the registered handler, and opens that exact URL with recent items
 disabled. Started/terminal audits omit the path and raw error detail.
 
+## Bounded application sequences
+
+`ApplicationSequenceParser` handles a deliberately narrow shape:
+
+```text
+<open-or-focus exact app> and <later app goal>
+```
+
+It delegates the first clause to `ApplicationCommandParser`. The second clause is
+never executable. Continue/resume-playing wording becomes
+`DeferredApplicationGoal.continuePlayback`; a closed verb set can produce
+`.unsupported`; a bare second app name is rejected.
+
+`ApplicationSequencePlanner` binds the exact `ResolvedApplication` before rendering
+two `ApplicationSequenceStep` values:
+
+1. `confirmableNow`: the existing single native launch/focus proposal.
+2. `deferredUnsupported`: a preview explaining future visible interaction,
+   exact UI-state verification, and fresh confirmation requirements.
+
+Only step 1 has a capability profile, `ActionPlan`, preview consent, execution
+contract, executor path, and audit lifecycle. Step 2 text is absent from all those
+types. Confirming step 1 therefore cannot create ambient authority for playback or
+any other follow-up. The model keeps step 2 visible after step 1 succeeds and
+reports that it was not attempted or queued.
+
 ## Research boundary
 
 Research uses a two-stage approval model:
@@ -244,6 +274,7 @@ Accessibility trust, compose three local foreground intents, and render a scoped
 illustrative plan. It can also launch or foreground one exactly named local app
 after a separate confirmation. It can search approved local name metadata, bind one
 exact result, preview the intended visible Command-Space route, and use a confirmed
-native exact-item fallback. Network/LLM requests, voice, screen/accessibility-
-element inspection, clicks, typing, media, and generic action generation remain
-disabled.
+native exact-item fallback. It can also split one exact app lifecycle action from a
+later app goal, confirming only the first while retaining the second as unsupported
+preview text. Network/LLM requests, voice, screen/accessibility-element inspection,
+clicks, typing, media, and generic action generation remain disabled.
