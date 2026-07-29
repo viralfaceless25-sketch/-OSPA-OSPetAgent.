@@ -48,8 +48,19 @@ final class FloatingPanelController {
         panel.setFrameAutosaveName("AvatarCompanionFloatingPanel")
         panel.contentView = NSHostingView(rootView: AvatarView(model: model))
 
-        if !panel.setFrameUsingName("AvatarCompanionFloatingPanel"),
-           let visibleFrame = NSScreen.main?.visibleFrame {
+        if panel.setFrameUsingName("AvatarCompanionFloatingPanel") {
+            let restoredFrame = panel.frame
+            let collapsedSize = NSSize(width: 128, height: 132)
+            panel.setFrame(
+                NSRect(
+                    x: restoredFrame.maxX - collapsedSize.width,
+                    y: restoredFrame.maxY - collapsedSize.height,
+                    width: collapsedSize.width,
+                    height: collapsedSize.height
+                ),
+                display: false
+            )
+        } else if let visibleFrame = NSScreen.main?.visibleFrame {
             let origin = NSPoint(
                 x: visibleFrame.maxX - panel.frame.width - 24,
                 y: visibleFrame.maxY - panel.frame.height - 24

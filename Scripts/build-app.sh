@@ -9,6 +9,7 @@ cd "$project_dir"
 swift build -c "$configuration"
 binary_dir=$(swift build -c "$configuration" --show-bin-path)
 
+rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS"
 cp "$binary_dir/AvatarCompanion" "$app_dir/Contents/MacOS/AvatarCompanion"
 cp "$project_dir/Packaging/Info.plist" "$app_dir/Contents/Info.plist"

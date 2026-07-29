@@ -7,7 +7,7 @@ deliberately proves the interaction and safety boundary before adding automation
 
 - Borderless floating SwiftUI/AppKit panel across Spaces and full-screen apps
 - Drag from window background; expand/collapse by clicking avatar
-- Menu bar show/hide (`⌘⇧A`) and quit
+- Menu bar show/hide and quit (`⌘⇧A` while app menu handling is active)
 - Observe-only safe default
 - Emergency stop (`⌘.`) from avatar or menu bar
 - Closed command allowlist
