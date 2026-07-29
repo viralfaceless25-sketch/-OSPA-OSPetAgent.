@@ -102,7 +102,7 @@ struct AvatarView: View {
             }
 
             HStack(spacing: 8) {
-                TextField("Try “copy time”", text: $model.command)
+                TextField("Try “focus this app”", text: $model.command)
                     .textFieldStyle(.roundedBorder)
                     .focused($commandFocused)
                     .onSubmit(model.previewCommand)
@@ -306,6 +306,18 @@ struct AvatarView: View {
                 "Permission: Accessibility, internally scoped to this exact bundle ID."
             )
             .font(.caption)
+
+            Text("Audit contract: \(preview.contractID.uuidString)")
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+
+            Text(
+                "Expires: \(preview.expiresAt.formatted(date: .omitted, time: .standard))"
+            )
+            .font(.caption)
+
+            Text("In-memory preview records: \(model.previewAuditRecords.count)")
+                .font(.caption)
 
             ForEach(preview.steps, id: \.self) { step in
                 Text(step)

@@ -19,6 +19,7 @@ final class AvatarModel: ObservableObject {
     @Published var accessibilityStatus =
         "Accessibility permission has not been checked."
     @Published var computerUsePreview: ComputerUsePreview?
+    @Published private(set) var previewAuditRecords: [PreviewAuditRecord] = []
 
     var onExpansionChanged: ((Bool) -> Void)?
     var onHide: (() -> Void)?
@@ -28,6 +29,7 @@ final class AvatarModel: ObservableObject {
     private let researchGate = ResearchGate()
     private let accessibilityPermission = AccessibilityPermissionController()
     private let previewAdapter = PreviewOnlyForegroundAdapter()
+    private let foregroundComposer = ForegroundCommandComposer()
 
     func toggleExpanded() {
         isExpanded.toggle()
@@ -38,10 +40,11 @@ final class AvatarModel: ObservableObject {
         switch interpreter.interpret(command) {
         case .help:
             previewedAction = nil
-            status = "Try “copy time”. Only allowlisted commands are recognized."
-        case let .rejected(reason):
+            status =
+                "Try “copy time”, “focus this app”, “preview save”, or “preview find”."
+        case .rejected:
             previewedAction = nil
-            status = reason
+            composeForegroundCommand()
         case let .action(action):
             previewedAction = action
             switch gate.evaluate(action, state: safety, userConfirmed: false) {
@@ -84,6 +87,7 @@ final class AvatarModel: ObservableObject {
         safety.emergencyStopped = true
         safety.observeOnly = true
         previewedAction = nil
+        computerUsePreview = nil
         command = ""
         status = "Stopped. All actions blocked."
     }
@@ -110,6 +114,7 @@ final class AvatarModel: ObservableObject {
         )
         researchRequest = nil
         researchAuthorization = nil
+        computerUsePreview = nil
         discoveryStatus =
             "Identified \(displayName) by bundle ID only. No app content was read."
     }
@@ -183,14 +188,58 @@ final class AvatarModel: ObservableObject {
             return
         }
 
+        let composition = foregroundComposer.compose(
+            "preview save",
+            target: app
+        )
+        guard case let .supported(intent) = composition else {
+            discoveryStatus = "Built-in preview intent unavailable."
+            return
+        }
+        buildPreview(for: intent)
+    }
+
+    private func composeForegroundCommand() {
+        guard let app = discoveredApp else {
+            status =
+                "Not a local command. Identify the foreground app before requesting app actions."
+            computerUsePreview = nil
+            return
+        }
+        guard
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+                == app.bundleIdentifier
+        else {
+            status =
+                "Foreground app changed. Identify it again before composing a plan."
+            computerUsePreview = nil
+            return
+        }
+
+        switch foregroundComposer.compose(command, target: app) {
+        case let .supported(intent):
+            buildPreview(for: intent)
+            status =
+                "Bound “\(intent.title)” to \(app.displayName). Review exact plan below; execution is disabled."
+        case let .ambiguous(reason):
+            computerUsePreview = nil
+            status = "Ambiguous request: \(reason)"
+        case let .unsupported(reason):
+            computerUsePreview = nil
+            status = "Unsupported request: \(reason)"
+        }
+    }
+
+    private func buildPreview(for intent: ComposedForegroundIntent) {
+        let app = intent.target
         let now = Date()
         let permission = PermissionScope.accessibility(
             targetBundleIdentifier: app.bundleIdentifier
         )
         let capability = CapabilityDefinition(
-            id: "illustrative.command-s.preview",
-            name: "Illustrative Command-S preview",
-            effectSummary: "Show how a visible foreground shortcut would be proposed.",
+            id: intent.capabilityID,
+            name: intent.title,
+            effectSummary: intent.effectPreviews.joined(separator: " "),
             adapter: .foregroundComputerUse,
             risk: .meaningful,
             requiredPermissions: [permission],
@@ -204,26 +253,17 @@ final class AvatarModel: ObservableObject {
         )
         let plan = ActionPlan(
             app: app,
-            steps: [
+            steps: zip(intent.steps, intent.effectPreviews).map {
+                interaction, effect in
                 PlannedStep(
                     capabilityID: capability.id,
                     targetBundleIdentifier: app.bundleIdentifier,
-                    effectPreview: "Target app would become foreground.",
-                    redactedParameterSummary: "Exact bundle identifier only",
-                    visibleInteraction: .activateTargetApplication
-                ),
-                PlannedStep(
-                    capabilityID: capability.id,
-                    targetBundleIdentifier: app.bundleIdentifier,
-                    effectPreview:
-                        "Illustrative only; this shortcut is not claimed to be supported by every app.",
-                    redactedParameterSummary: "One Command-S shortcut",
-                    visibleInteraction: .keyboardShortcut(
-                        key: "S",
-                        modifiers: [.command]
-                    )
-                ),
-            ],
+                    effectPreview: effect,
+                    redactedParameterSummary:
+                        interaction.previewDescription,
+                    visibleInteraction: interaction
+                )
+            },
             createdAt: now
         )
         let consent = ConsentGrant(
@@ -248,7 +288,7 @@ final class AvatarModel: ObservableObject {
             )
             let frontmostBundleIdentifier =
                 NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-            computerUsePreview = previewAdapter.render(
+            let preview = previewAdapter.render(
                 contract,
                 context: ExecutionContext(
                     frontmostBundleIdentifier: frontmostBundleIdentifier,
@@ -258,8 +298,12 @@ final class AvatarModel: ObservableObject {
                     now: now
                 )
             )
+            computerUsePreview = preview
+            previewAuditRecords.append(
+                PreviewAuditRecord(preview: preview, renderedAt: now)
+            )
             discoveryStatus =
-                "Preview contract created. It expires in 60 seconds and cannot execute."
+                "Preview contract created and audited. It expires in 60 seconds and cannot execute."
         } catch {
             computerUsePreview = nil
             discoveryStatus = "Preview contract rejected: \(error)"

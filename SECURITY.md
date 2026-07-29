@@ -50,6 +50,25 @@ Real event generation requires a future explicit product milestone, executable
 adapter review, user-granted Accessibility permission, action-mode opt-in,
 evidence-backed profile, exact plan approval, and meaningful-action confirmation.
 
+## Milestone 4 command-composer boundary
+
+- Natural-language matching is deterministic, local, and token-based.
+- Supported intents are a closed enum: focus app, illustrative save preview, and
+  illustrative find preview.
+- Exact foreground bundle ID must still match the previously identified app.
+- Multiple supported intents are rejected as ambiguous.
+- Unknown requests and high-impact verbs are rejected before plan creation.
+- User text never becomes a raw event, script, coordinate, accessibility query, or
+  audit payload.
+- Composed interactions remain typed `VisibleInteraction` values.
+- Preview contracts preserve exact permission scope, one-shot consent, 60-second
+  expiry, stop state, and unconditional execution disablement.
+- Preview audit records store generated IDs, target bundle ID, timestamp, and
+  readiness issues—not the natural-language request.
+
+This milestone adds no voice, screen inspection, network/LLM request,
+accessibility-element read, keyboard/mouse injection, or foreground executor.
+
 macOS Accessibility permission is process-wide. Future computer-use code must apply
 stricter internal per-app targeting on every step. OS permission alone is never
 treated as consent.

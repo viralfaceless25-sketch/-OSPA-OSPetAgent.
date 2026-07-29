@@ -87,6 +87,28 @@ struct ComputerUsePreviewTests {
         #expect(!preview.executionEnabled)
     }
 
+    @Test("Audit record contains identifiers, target, and readiness only")
+    func auditRecord() throws {
+        let preview = PreviewOnlyForegroundAdapter().render(
+            try makeContract(),
+            context: ExecutionContext(
+                frontmostBundleIdentifier: app.bundleIdentifier,
+                accessibilityPermissionGranted: true,
+                emergencyStopped: false,
+                now: now
+            )
+        )
+        let record = PreviewAuditRecord(
+            preview: preview,
+            renderedAt: now
+        )
+
+        #expect(record.contractID == preview.contractID)
+        #expect(record.planID == preview.planID)
+        #expect(record.targetBundleIdentifier == app.bundleIdentifier)
+        #expect(record.readinessIssues.isEmpty)
+    }
+
     private typealias Fixture = (
         plan: ActionPlan,
         profile: CapabilityProfile,

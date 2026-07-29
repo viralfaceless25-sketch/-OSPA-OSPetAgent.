@@ -37,6 +37,11 @@ PreviewValidatedPlan ── ComputerUsePreviewContract
   │ typed descriptions only
   ▼
 PreviewOnlyForegroundAdapter ── readiness report, execution always false
+
+Command text ── local closed-intent composer ── exact AppIdentity
+  │ supported typed recipe only
+  ▼
+PreviewValidatedPlan ── preview contract ── redacted PreviewAuditRecord
 ```
 
 Every arrow is a code boundary. Web content cannot call tools, modify policy,
@@ -97,6 +102,29 @@ It deliberately does not conform to `CapabilityAdapter` and has no `execute`
 method. This type separation prevents permission or preview state from becoming
 ambient execution authority.
 
+## Foreground-context command composer
+
+`ForegroundCommandComposer` is deliberately not an LLM. It normalizes local text
+into tokens and matches a closed `SupportedForegroundIntent` enum:
+
+- focus exact target application;
+- illustrative Command-S preview;
+- illustrative Command-F preview.
+
+The composer returns either a typed recipe, an ambiguity reason, or an unsupported
+reason. High-impact verbs are denied before matching. Similar words do not match by
+substring. Multiple intents cannot share one consent.
+
+The app binds a recipe only when the currently foreground bundle identifier equals
+the identity the user previously captured. It then creates a 60-second, one-shot,
+exact-scope preview plan. User text is discarded from the plan and audit; only
+typed interactions and redacted effect descriptions cross the trust boundary.
+
+Each rendered preview creates an in-memory `PreviewAuditRecord` containing contract
+ID, plan ID, target bundle ID, timestamp, and readiness issues. It contains no
+command text, screen data, or event payload. Emergency stop clears the active
+preview while retaining audit history.
+
 ## Research boundary
 
 Research uses a two-stage approval model:
@@ -131,5 +159,6 @@ or researched instruction text belongs in an execution contract.
 
 The avatar can identify the foreground app, stage an official documentation
 research scope, show exact limits, record explicit approval, check/request macOS
-Accessibility trust, and render a scoped illustrative plan. Network fetch,
-accessibility-element inspection, and action generation remain disabled.
+Accessibility trust, compose three local foreground intents, and render a scoped
+illustrative plan. Network/LLM requests, voice, screen/accessibility-element
+inspection, and action generation remain disabled.

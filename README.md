@@ -24,6 +24,8 @@ planning, consent, and audit contracts without enabling live automation.
 - Redacted audit event model
 - User-triggered macOS Accessibility check/request flow
 - Typed, non-executable visible-step previews with readiness blockers
+- Deterministic foreground-context natural-language command composer
+- In-memory redacted preview audit records
 
 No credentials, screen capture, accessibility-element inspection, input generation,
 files, network fetch, shell, AppleScript, or global keyboard monitoring are used.
@@ -82,6 +84,23 @@ Approval is demonstrable state only. No page is fetched in this milestone.
 The Command-S example is explicitly illustrative, not a learned universal shortcut.
 The preview adapter has no execute method and always reports execution disabled.
 
+## Try foreground-context commands
+
+1. Bring a target app forward and select **Identify foreground app**.
+2. In the command palette, enter one request:
+   - `focus this app`
+   - `save this document`
+   - `find text`
+3. Select **Preview**.
+4. Review exact bundle ID, typed steps, effects, readiness blockers, expiry, and
+   audit contract ID.
+
+Parsing is deterministic and local. No LLM or network request occurs. Save and find
+shortcuts are illustrative preview mappings, not claims that every app supports
+them. Requests with multiple intents, unknown behavior, or high-impact verbs such
+as send, delete, publish, or quit are rejected with a specific explanation.
+Changing foreground apps after identification also blocks composition.
+
 ## Architecture
 
 ```text
@@ -104,6 +123,11 @@ PreviewValidatedPlan ── ComputerUsePreviewContract
         │
         ▼
 PreviewOnlyForegroundAdapter ── exact steps + readiness, never events
+
+Command palette ── ForegroundCommandComposer (local allowlist)
+        │ exact AppIdentity + typed intent
+        ▼
+PreviewValidatedPlan ── preview contract ── redacted audit record
 ```
 
 `AvatarCore` has no AppKit dependency. UI and side-effect code live in the
