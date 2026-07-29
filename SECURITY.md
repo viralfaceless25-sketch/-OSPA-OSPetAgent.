@@ -27,7 +27,28 @@ Avatar Companion starts with zero ambient automation authority.
 - Execution preflight rejects focus drift, missing Accessibility permission,
   emergency stop, or expired contracts.
 - Audit events contain contract/plan IDs and redacted outcomes, not raw secrets.
-- No Accessibility request or keyboard/mouse/window event generation ships yet.
+- No accessibility-element inspection or keyboard/mouse/window event generation
+  ships. Permission request arrives only in milestone 3.
+
+## Milestone 3 permission and preview boundary
+
+- Accessibility status checks use `AXIsProcessTrusted()` and do not prompt.
+- The macOS permission prompt uses `AXIsProcessTrustedWithOptions` only from the
+  explicit **Request from macOS** button.
+- Granting OS permission does not enable execution.
+- Visible steps are typed descriptions: target activation, shortcut, or named
+  accessibility press. No raw coordinate or event payload exists.
+- `PreviewValidatedPlan` checks exact target, capability, consent, expiry, risk,
+  and permission scope without creating executable authority.
+- `ComputerUsePreviewContract` is separate from `ExecutionContract`.
+- `PreviewOnlyForegroundAdapter` has no execute method and always returns
+  `executionEnabled = false`.
+- Preview readiness reports focus drift, missing permission, emergency stop, and
+  expiry. It reads no screen or accessibility-element content.
+
+Real event generation requires a future explicit product milestone, executable
+adapter review, user-granted Accessibility permission, action-mode opt-in,
+evidence-backed profile, exact plan approval, and meaningful-action confirmation.
 
 macOS Accessibility permission is process-wide. Future computer-use code must apply
 stricter internal per-app targeting on every step. OS permission alone is never

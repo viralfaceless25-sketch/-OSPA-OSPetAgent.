@@ -15,6 +15,10 @@ final class AvatarModel: ObservableObject {
     @Published var researchAuthorization: ResearchAuthorization?
     @Published var discoveryStatus =
         "Identify the foreground app without reading its screen or files."
+    @Published var accessibilityPermissionGranted = false
+    @Published var accessibilityStatus =
+        "Accessibility permission has not been checked."
+    @Published var computerUsePreview: ComputerUsePreview?
 
     var onExpansionChanged: ((Bool) -> Void)?
     var onHide: (() -> Void)?
@@ -22,6 +26,8 @@ final class AvatarModel: ObservableObject {
     private let interpreter = CommandInterpreter()
     private let gate = ActionGate()
     private let researchGate = ResearchGate()
+    private let accessibilityPermission = AccessibilityPermissionController()
+    private let previewAdapter = PreviewOnlyForegroundAdapter()
 
     func toggleExpanded() {
         isExpanded.toggle()
@@ -151,6 +157,112 @@ final class AvatarModel: ObservableObject {
                 "Approved \(hosts) for 15 minutes. Network fetch remains disabled in this milestone."
         } catch {
             discoveryStatus = researchErrorMessage(error)
+        }
+    }
+
+    func refreshAccessibilityPermission() {
+        accessibilityPermissionGranted = accessibilityPermission.isGranted()
+        accessibilityStatus =
+            accessibilityPermissionGranted
+            ? "Accessibility permission granted. Execution remains disabled."
+            : "Accessibility permission not granted. Preview remains available."
+    }
+
+    func requestAccessibilityPermission() {
+        accessibilityPermissionGranted =
+            accessibilityPermission.requestFromUser()
+        accessibilityStatus =
+            accessibilityPermissionGranted
+            ? "Accessibility permission granted. Execution remains disabled."
+            : "macOS permission requested. Approve Avatar Companion in System Settings, then check again."
+    }
+
+    func buildPreviewOnlyComputerUsePlan() {
+        guard let app = discoveredApp else {
+            discoveryStatus = "Identify an app before building a preview."
+            return
+        }
+
+        let now = Date()
+        let permission = PermissionScope.accessibility(
+            targetBundleIdentifier: app.bundleIdentifier
+        )
+        let capability = CapabilityDefinition(
+            id: "illustrative.command-s.preview",
+            name: "Illustrative Command-S preview",
+            effectSummary: "Show how a visible foreground shortcut would be proposed.",
+            adapter: .foregroundComputerUse,
+            risk: .meaningful,
+            requiredPermissions: [permission],
+            evidence: .bundled
+        )
+        let profile = CapabilityProfile(
+            app: app,
+            capabilities: [capability],
+            reviewedClaimIDs: [],
+            approvedAt: now
+        )
+        let plan = ActionPlan(
+            app: app,
+            steps: [
+                PlannedStep(
+                    capabilityID: capability.id,
+                    targetBundleIdentifier: app.bundleIdentifier,
+                    effectPreview: "Target app would become foreground.",
+                    redactedParameterSummary: "Exact bundle identifier only",
+                    visibleInteraction: .activateTargetApplication
+                ),
+                PlannedStep(
+                    capabilityID: capability.id,
+                    targetBundleIdentifier: app.bundleIdentifier,
+                    effectPreview:
+                        "Illustrative only; this shortcut is not claimed to be supported by every app.",
+                    redactedParameterSummary: "One Command-S shortcut",
+                    visibleInteraction: .keyboardShortcut(
+                        key: "S",
+                        modifiers: [.command]
+                    )
+                ),
+            ],
+            createdAt: now
+        )
+        let consent = ConsentGrant(
+            planID: plan.id,
+            scopes: [permission],
+            approvedAt: now,
+            expiresAt: now.addingTimeInterval(60),
+            oneShot: true
+        )
+
+        do {
+            let validated = try PlanValidator().validateForPreview(
+                plan: plan,
+                profile: profile,
+                consent: consent,
+                userConfirmedPreview: true,
+                now: now
+            )
+            let contract = ComputerUsePreviewContract(
+                validatedPlan: validated,
+                issuedAt: now
+            )
+            let frontmostBundleIdentifier =
+                NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            computerUsePreview = previewAdapter.render(
+                contract,
+                context: ExecutionContext(
+                    frontmostBundleIdentifier: frontmostBundleIdentifier,
+                    accessibilityPermissionGranted:
+                        accessibilityPermissionGranted,
+                    emergencyStopped: safety.emergencyStopped,
+                    now: now
+                )
+            )
+            discoveryStatus =
+                "Preview contract created. It expires in 60 seconds and cannot execute."
+        } catch {
+            computerUsePreview = nil
+            discoveryStatus = "Preview contract rejected: \(error)"
         }
     }
 

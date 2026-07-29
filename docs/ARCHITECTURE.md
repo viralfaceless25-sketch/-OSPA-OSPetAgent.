@@ -1,7 +1,8 @@
 # Permissioned computer-use architecture
 
-Milestone 2 defines universal foreground automation contracts. It does not generate
-keyboard or pointer events and does not request Accessibility permission.
+Milestones 2–3 define universal foreground automation contracts, a user-triggered
+Accessibility permission flow, and non-executable previews. They do not generate
+keyboard or pointer events or inspect accessibility elements.
 
 ## Trust pipeline
 
@@ -31,6 +32,11 @@ ValidatedPlan
   │ focus + permission + stop + expiry preflight
   ▼
 ExecutionContract ── CapabilityAdapter ── AuditEvent
+
+PreviewValidatedPlan ── ComputerUsePreviewContract
+  │ typed descriptions only
+  ▼
+PreviewOnlyForegroundAdapter ── readiness report, execution always false
 ```
 
 Every arrow is a code boundary. Web content cannot call tools, modify policy,
@@ -56,6 +62,40 @@ Avatar Companion therefore applies a narrower internal policy:
 Per-app APIs, URL schemes, or documented scripts may become optional adapters when
 useful. They are not required for universal interaction and cannot bypass the same
 planning, consent, review, and audit gates.
+
+## Accessibility permission flow
+
+Permission has two explicit UI operations:
+
+- **Check** calls `AXIsProcessTrusted()` without showing UI.
+- **Request from macOS** calls `AXIsProcessTrustedWithOptions` with the prompt
+  option. This call exists only in the button handler.
+
+macOS owns the consent dialog and setting. Avatar Companion cannot grant itself
+permission. A grant changes only reported readiness; it does not register an
+executor, disable observe-only, or authorize any plan.
+
+## Preview-only adapter
+
+`VisibleInteraction` is a typed description enum. Current cases describe target
+activation, a bounded keyboard shortcut, or a named accessibility press. No case
+contains arbitrary code, raw events, unbounded text, or coordinates.
+
+`PlanValidator.validateForPreview` validates exact app target, known capability,
+exact permission scopes, expiring one-shot consent, risk, and explicit preview
+confirmation. It returns `PreviewValidatedPlan`, which cannot initialize an
+`ExecutionContract`.
+
+`PreviewOnlyForegroundAdapter` renders:
+
+- exact target app and bundle-scoped permission;
+- ordered visible steps and effects;
+- focus, permission, stop, and expiry readiness issues;
+- an unconditional disabled execution state.
+
+It deliberately does not conform to `CapabilityAdapter` and has no `execute`
+method. This type separation prevents permission or preview state from becoming
+ambient execution authority.
 
 ## Research boundary
 
@@ -90,5 +130,6 @@ or researched instruction text belongs in an execution contract.
 ## Current vertical slice
 
 The avatar can identify the foreground app, stage an official documentation
-research scope, show exact limits, and record explicit approval. Network fetch and
-Accessibility action generation intentionally remain disabled.
+research scope, show exact limits, record explicit approval, check/request macOS
+Accessibility trust, and render a scoped illustrative plan. Network fetch,
+accessibility-element inspection, and action generation remain disabled.

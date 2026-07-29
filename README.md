@@ -22,9 +22,12 @@ planning, consent, and audit contracts without enabling live automation.
 - App-targeted, expiring, one-shot consent and action plans
 - Execution preflight for focus, Accessibility permission, stop, and expiry
 - Redacted audit event model
+- User-triggered macOS Accessibility check/request flow
+- Typed, non-executable visible-step previews with readiness blockers
 
-No credentials, screen capture, Accessibility request, input generation, files,
-network fetch, shell, AppleScript, or global keyboard monitoring are used.
+No credentials, screen capture, accessibility-element inspection, input generation,
+files, network fetch, shell, AppleScript, or global keyboard monitoring are used.
+Accessibility is checked or requested only after selecting the corresponding button.
 
 ## Requirements
 
@@ -68,6 +71,17 @@ identity, hardened runtime, notarization, and a unique bundle identifier.
 
 Approval is demonstrable state only. No page is fetched in this milestone.
 
+## Try preview-only computer use
+
+1. Identify a foreground app.
+2. Select **Check** to read current Accessibility trust without prompting.
+3. Optionally select **Request from macOS** to trigger the system consent UI.
+4. Select **Create preview-only ⌘S plan**.
+5. Review exact app target, two typed visible steps, and readiness blockers.
+
+The Command-S example is explicitly illustrative, not a learned universal shortcut.
+The preview adapter has no execute method and always reports execution disabled.
+
 ## Architecture
 
 ```text
@@ -85,11 +99,24 @@ ActionPlan ── ConsentGrant ── PlanValidator
         │
         ▼
 ExecutionContract ── foreground preflight ── adapter + audit
+
+PreviewValidatedPlan ── ComputerUsePreviewContract
+        │
+        ▼
+PreviewOnlyForegroundAdapter ── exact steps + readiness, never events
 ```
 
 `AvatarCore` has no AppKit dependency. UI and side-effect code live in the
 executable target. See [SECURITY.md](SECURITY.md) and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for capability requirements.
+
+## Future real-action opt-in
+
+Real computer use requires a later, separately reviewed executable adapter plus all
+of these user actions: grant macOS Accessibility permission, disable observe-only,
+review an evidence-backed capability profile, approve an exact expiring plan, and
+confirm meaningful effects. Current build cannot generate events even when
+Accessibility permission is granted.
 
 ## License
 

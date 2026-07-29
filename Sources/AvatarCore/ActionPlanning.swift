@@ -1,24 +1,66 @@
 import Foundation
 
+public enum ModifierKey: String, Equatable, Hashable, Sendable {
+    case command
+    case option
+    case control
+    case shift
+
+    public var symbol: String {
+        switch self {
+        case .command: "⌘"
+        case .option: "⌥"
+        case .control: "⌃"
+        case .shift: "⇧"
+        }
+    }
+}
+
+/// Typed description only. It contains no event-generation implementation.
+public enum VisibleInteraction: Equatable, Sendable {
+    case activateTargetApplication
+    case keyboardShortcut(key: String, modifiers: Set<ModifierKey>)
+    case accessibilityPress(role: String, label: String)
+
+    public var previewDescription: String {
+        switch self {
+        case .activateTargetApplication:
+            return "Bring the exact target application to the foreground."
+        case let .keyboardShortcut(key, modifiers):
+            let prefix =
+                modifiers
+                .sorted { $0.rawValue < $1.rawValue }
+                .map(\.symbol)
+                .joined()
+            return "Press \(prefix)\(key.uppercased()) once."
+        case let .accessibilityPress(role, label):
+            return "Press accessibility element “\(label)” with role \(role)."
+        }
+    }
+}
+
 public struct PlannedStep: Equatable, Sendable, Identifiable {
     public let id: UUID
     public let capabilityID: String
     public let targetBundleIdentifier: String
     public let effectPreview: String
     public let redactedParameterSummary: String
+    public let visibleInteraction: VisibleInteraction?
 
     public init(
         id: UUID = UUID(),
         capabilityID: String,
         targetBundleIdentifier: String,
         effectPreview: String,
-        redactedParameterSummary: String
+        redactedParameterSummary: String,
+        visibleInteraction: VisibleInteraction? = nil
     ) {
         self.id = id
         self.capabilityID = capabilityID
         self.targetBundleIdentifier = targetBundleIdentifier
         self.effectPreview = effectPreview
         self.redactedParameterSummary = redactedParameterSummary
+        self.visibleInteraction = visibleInteraction
     }
 }
 
@@ -85,6 +127,12 @@ public struct ValidatedPlan: Equatable, Sendable {
     public let maximumRisk: ActionRisk
 }
 
+public struct PreviewValidatedPlan: Equatable, Sendable {
+    public let plan: ActionPlan
+    public let consent: ConsentGrant
+    public let maximumRisk: ActionRisk
+}
+
 public struct PlanValidator: Sendable {
     public init() {}
 
@@ -102,6 +150,30 @@ public struct PlanValidator: Sendable {
         if safety.observeOnly {
             throw PlanValidationError.observeOnly
         }
+        let preview = try validateForPreview(
+            plan: plan,
+            profile: profile,
+            consent: consent,
+            userConfirmedPreview: userConfirmedPreview,
+            now: now
+        )
+
+        return ValidatedPlan(
+            plan: preview.plan,
+            consent: preview.consent,
+            maximumRisk: preview.maximumRisk
+        )
+    }
+
+    /// Validates structure and consent without creating executable authority.
+    public func validateForPreview(
+        plan: ActionPlan,
+        profile: CapabilityProfile,
+        consent: ConsentGrant,
+        userConfirmedPreview: Bool,
+        now: Date
+    ) throws -> PreviewValidatedPlan {
+        try ProfileValidator().validate(profile)
         guard !plan.steps.isEmpty else {
             throw PlanValidationError.emptyPlan
         }
@@ -143,7 +215,7 @@ public struct PlanValidator: Sendable {
             throw PlanValidationError.confirmationRequired
         }
 
-        return ValidatedPlan(
+        return PreviewValidatedPlan(
             plan: plan,
             consent: consent,
             maximumRisk: maximumRisk

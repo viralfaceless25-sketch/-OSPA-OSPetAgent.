@@ -246,10 +246,92 @@ struct AvatarView: View {
                     .controlSize(.large)
                     .disabled(model.researchAuthorization != nil)
                 }
+
+                Divider()
+
+                Label("Accessibility permission", systemImage: "hand.raised")
+                    .font(.subheadline.weight(.semibold))
+
+                Text(model.accessibilityStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Button("Check") {
+                        model.refreshAccessibilityPermission()
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Request from macOS") {
+                        model.requestAccessibilityPermission()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .controlSize(.large)
+
+                Text(
+                    "Request opens macOS consent UI. This app still has no code that reads UI or sends input."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                Button("Create preview-only ⌘S plan") {
+                    model.buildPreviewOnlyComputerUsePlan()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                if let preview = model.computerUsePreview {
+                    computerUsePreview(preview)
+                }
             }
         }
         .padding(12)
         .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func computerUsePreview(
+        _ preview: ComputerUsePreview
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label("Non-executable preview", systemImage: "eye")
+                .font(.caption.weight(.semibold))
+
+            Text(
+                "Target: \(preview.target.displayName) (\(preview.target.bundleIdentifier))"
+            )
+            .font(.caption)
+
+            Text(
+                "Permission: Accessibility, internally scoped to this exact bundle ID."
+            )
+            .font(.caption)
+
+            ForEach(preview.steps, id: \.self) { step in
+                Text(step)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if preview.readinessIssues.isEmpty {
+                Text("Preflight: permission and foreground target match.")
+                    .foregroundStyle(.green)
+            } else {
+                ForEach(
+                    preview.readinessIssues.map(\.description),
+                    id: \.self
+                ) { issue in
+                    Text("Blocked: \(issue)")
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            Text("Execution: disabled by preview-only adapter.")
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption)
+        .padding(10)
+        .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var modeLabel: String {
