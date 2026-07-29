@@ -2,7 +2,8 @@
 
 Native macOS foundation for a lightweight, draggable desktop avatar. Milestone 1
 proves the interaction boundary. Milestone 2 adds app-agnostic discovery, research,
-planning, consent, and audit contracts without enabling live automation.
+planning, consent, and audit contracts. Later bounded milestones add confirmed
+native opening plus explicit, read-only Accessibility evidence collection.
 
 ## Included
 
@@ -34,12 +35,15 @@ planning, consent, and audit contracts without enabling live automation.
 - Preview-only visible Command-Space plan plus confirmed native exact-item fallback
 - Deterministic ordered app plan with one confirmable lifecycle step
 - Explicitly deferred, non-executable app-specific follow-up goals
+- One-shot, exact-foreground Accessibility UI inspection
+- Bounded, allowlisted, redacted control/action evidence and preview
 
-No credentials, screen capture, accessibility-element inspection, input generation,
-file-content reads, network fetch, shell, AppleScript, or global keyboard monitoring
-are used. Search reads only local name/path/type metadata from user-approved scopes.
-Accessibility is checked or requested only after selecting the corresponding
-button.
+No credentials, screen capture, input generation, file-content reads, network
+fetch, shell, AppleScript, or global keyboard monitoring are used. Accessibility
+inspection reads only a bounded allowlist of interactive metadata after two
+explicit user steps; unknown labels are discarded before snapshot storage. Search
+reads only local name/path/type metadata from user-approved scopes. Accessibility
+is checked or requested only after selecting the corresponding button.
 
 ## Requirements
 
@@ -93,6 +97,30 @@ Approval is demonstrable state only. No page is fetched in this milestone.
 
 The Command-S example is explicitly illustrative, not a learned universal shortcut.
 The preview adapter has no execute method and always reports execution disabled.
+
+## Inspect one exact foreground app
+
+1. Bring the target app forward, expand Avatar Companion, then select
+   **Identify foreground app**.
+2. Select **Check**. If permission is missing, use **Request from macOS**, approve
+   in System Settings, then select **Check** again.
+3. Select **Prepare inspection scope**. Nothing is read at this step.
+4. Review exact bundle ID, 20-control/60-element/depth-4 caps, redaction rules, and
+   60-second expiry.
+5. Keep that exact app foreground and select **Approve and inspect once**.
+6. Review sanitized controls and action evidence. Execution remains disabled.
+
+The inspector checks exact foreground bundle ID and process before and during its
+bounded traversal. It reads interactive roles, `AXTitle` or `AXDescription`, and
+action names only. It never requests `AXValue`, selected text, document/static
+text, pixels, browser data, or credentials. Labels survive only when equal to a
+small generic-control allowlist such as Play, Pause, Search, or Settings. Every
+other label becomes `[redacted label]` before snapshot storage. Audit records keep
+request IDs, target bundle ID, counts, truncation, and outcome—never labels.
+
+Some apps expose no supported controls because their UI is loading, isolated,
+custom-drawn, or not Accessibility-compatible. Avatar Companion reports that
+result and does not broaden inspection or fall back to screen capture.
 
 ## Try foreground-context commands
 
@@ -179,9 +207,10 @@ The local deterministic parser renders:
 Confirming step 1 authorizes only one app launch/focus action. Step 2 is not part of
 the executable `ActionPlan`, consent grant, execution contract, or audit payload.
 It would require a future foreground-computer-use adapter that can inspect visible
-app state, present exact UI steps, and obtain a new confirmation. Current code does
-not inspect Netflix, sign in, search its catalog, resume media, send input, or make
-network requests.
+app state, present exact UI steps, and obtain a new confirmation. Current code may
+collect one explicitly approved, redacted Accessibility metadata snapshot, but
+does not sign in, search a catalog, resume media, send input, or make network
+requests.
 
 The sequence parser recognizes one exact launch/focus clause followed by a bounded
 app goal. Known continue/resume-playing wording receives a precise deferred
@@ -230,6 +259,11 @@ Approved search scope ── local name metadata ── ranked candidates
 Local sequence text ── exact app clause + deferred goal
         ├── step 1 ── existing one-step native plan + confirmation
         └── step 2 ── preview label only; unsupported and never queued
+
+Exact foreground app + explicit inspection approval
+        │ one-shot exact Accessibility scope + fresh focus checks
+        ▼
+Bounded AX metadata read ── allowlist/redaction ── evidence preview, never events
 ```
 
 `AvatarCore` has no AppKit dependency. UI and side-effect code live in the
@@ -242,8 +276,9 @@ Real computer use requires a later, separately reviewed executable adapter plus 
 of these user actions: grant macOS Accessibility permission, disable observe-only,
 review an evidence-backed capability profile, approve an exact expiring plan, and
 confirm meaningful effects. Current build cannot generate keyboard or mouse events
-even when Accessibility permission is granted. Current opening execution uses only
-the separately confirmed native exact-item fallback.
+even when Accessibility permission is granted. Read-only inspection does not
+disable observe-only or create execution authority. Current opening execution uses
+only the separately confirmed native exact-item fallback.
 
 ## License
 

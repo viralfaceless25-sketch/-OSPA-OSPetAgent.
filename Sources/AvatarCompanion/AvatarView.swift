@@ -716,9 +716,73 @@ struct AvatarView: View {
                 .controlSize(.large)
 
                 Text(
-                    "Request opens macOS consent UI. This app still has no code that reads UI or sends input."
+                    "Request opens macOS consent UI. Permission alone reads nothing and authorizes no input or execution."
                 )
                 .font(.caption)
+                .foregroundStyle(.secondary)
+
+                Divider()
+
+                Label(
+                    "One-time redacted UI inspection",
+                    systemImage: "rectangle.and.text.magnifyingglass"
+                )
+                .font(.subheadline.weight(.semibold))
+
+                Text(model.accessibilityInspectionStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Prepare inspection scope") {
+                    model.prepareAccessibilityInspection()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .disabled(model.safety.emergencyStopped)
+
+                if let request = model.accessibilityInspectionRequest {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Approval preview")
+                            .font(.caption.weight(.semibold))
+                        Text(
+                            "Target: \(request.target.displayName) (\(request.target.bundleIdentifier))"
+                        )
+                        Text(
+                            "Cap: \(request.maximumControls) controls from \(request.maximumVisitedElements) visited elements, depth \(request.maximumDepth)"
+                        )
+                        Text(
+                            "Expires: \(request.expiresAt.formatted(date: .omitted, time: .standard))"
+                        )
+                        Text(
+                            "Reads interactive role, title/description label, and supported action names only. Never AXValue, selected text, document text, or pixels."
+                        )
+                        Text(
+                            "Unknown labels are replaced with “[redacted label]” before storage."
+                        )
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    Button("Approve and inspect once") {
+                        model.approveAndInspectAccessibility()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(
+                        model.accessibilityInspectionRequestConsumed
+                            || model.safety.emergencyStopped
+                    )
+                }
+
+                if let snapshot = model.accessibilityUISnapshot {
+                    accessibilitySnapshotCard(snapshot)
+                }
+
+                Text(
+                    "Redacted inspection audit records: \(model.accessibilityInspectionAuditRecords.count)"
+                )
+                .font(.caption2)
                 .foregroundStyle(.secondary)
 
                 Button("Create preview-only ⌘S plan") {
@@ -790,6 +854,80 @@ struct AvatarView: View {
         .font(.caption)
         .padding(10)
         .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func accessibilitySnapshotCard(
+        _ snapshot: AccessibilityUISnapshot
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(
+                "Redacted Accessibility evidence",
+                systemImage: "checkmark.shield"
+            )
+            .font(.caption.weight(.semibold))
+
+            Text(
+                "Exact target: \(snapshot.target.displayName) (\(snapshot.target.bundleIdentifier))"
+            )
+            Text(
+                "Visited \(snapshot.visitedElementCount) elements • retained \(snapshot.controls.count) controls\(snapshot.truncated ? " • truncated" : "")"
+            )
+            Text(
+                "Evidence expires: \(snapshot.expiresAt.formatted(date: .omitted, time: .standard))"
+            )
+
+            if snapshot.controls.isEmpty {
+                Text(
+                    "No supported accessible controls were exposed. The app may be loading, isolate web content, or provide no compatible Accessibility tree. No broader fallback ran."
+                )
+                .foregroundStyle(.orange)
+            } else {
+                ForEach(snapshot.controls) { control in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(
+                            "\(control.id). \(control.role)\(control.label.map { " “\($0)”" } ?? "")"
+                        )
+                        .font(.caption.weight(.semibold))
+                        Text(
+                            control.actions.isEmpty
+                                ? "Actions: none retained"
+                                : "Actions: \(control.actions.map(\.displayName).joined(separator: ", "))"
+                        )
+                        .foregroundStyle(.secondary)
+                        if control.labelWasRedacted {
+                            Text("Original label discarded by allowlist redactor.")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                }
+            }
+
+            if let preview = model.accessibilityInteractionPreview {
+                Divider()
+                Text("Evidence-backed interaction preview")
+                    .font(.caption.weight(.semibold))
+                if preview.evidence.isEmpty {
+                    Text(
+                        "No supported action evidence is available for planning."
+                    )
+                    .foregroundStyle(.orange)
+                } else {
+                    ForEach(preview.evidence) { evidence in
+                        Text(evidence.description)
+                    }
+                }
+                Text("Execution: disabled. No action adapter is connected.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption)
+        .padding(10)
+        .background(.cyan.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(.cyan.opacity(0.24))
+        }
     }
 
     private var modeLabel: String {

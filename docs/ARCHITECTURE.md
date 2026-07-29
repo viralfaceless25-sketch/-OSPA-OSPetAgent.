@@ -2,7 +2,8 @@
 
 Milestones 2–3 define universal foreground automation contracts, a user-triggered
 Accessibility permission flow, and non-executable previews. They do not generate
-keyboard or pointer events or inspect accessibility elements.
+keyboard or pointer events or inspect accessibility elements. Milestone 8 adds a
+separate, explicitly approved, read-only and redacted Accessibility evidence path.
 
 ## Trust pipeline
 
@@ -58,6 +59,11 @@ LocalSearchRanker ── exact candidate selection
 Command text with `and` ── ApplicationSequenceParser
   ├── exact first app clause ── existing one-step executable contract
   └── typed deferred goal ── ordered preview only; no authority
+
+Exact AppIdentity + foreground PID ── one-shot inspection consent
+  │ bounded AX roles/title-description/actions
+  ▼
+allowlist redactor ── AccessibilityUISnapshot ── non-executable evidence preview
 ```
 
 Every arrow is a code boundary. Web content cannot call tools, modify policy,
@@ -236,6 +242,39 @@ types. Confirming step 1 therefore cannot create ambient authority for playback 
 any other follow-up. The model keeps step 2 visible after step 1 succeeds and
 reports that it was not attempted or queued.
 
+## Scoped Accessibility evidence
+
+Read-only inspection is a separate contract from action planning:
+
+1. User identifies one foreground `AppIdentity`.
+2. User explicitly checks or requests macOS Accessibility permission.
+3. **Prepare inspection scope** rechecks exact foreground bundle ID and creates a
+   60-second `AccessibilityInspectionRequest`; no AX read occurs.
+4. **Approve and inspect once** creates exact bundle-scoped, 30-second, one-shot
+   consent.
+5. `AccessibilityInspectionValidator` requires exact target, permission, approval,
+   expiry, bounds, unused consent, and no emergency stop.
+6. Model resolves current foreground PID. System source verifies that PID before
+   and throughout its breadth-first traversal.
+7. Source visits at most 60 elements to depth 4. Only supported interactive roles
+   may read `AXTitle`/`AXDescription` and action names.
+8. `AccessibilitySnapshotRedactor` drops unknown roles/actions, replaces unknown
+   labels, retains at most 20 controls, and creates an expiring snapshot.
+9. `AccessibilityInteractionPreview` renders sanitized evidence and hard-codes
+   `executionEnabled = false`.
+
+The source never requests `AXValue`, selected text, static/document text, or screen
+pixels. No `AXUIElementPerformAction`, `CGEvent`, keyboard, mouse, browser, network,
+login, or media path exists. Raw labels are transient between the AX call and
+redactor; they are neither logged nor persisted. Focus drift or source failure
+returns no partial snapshot. Audit records contain only IDs, exact target bundle
+ID, timestamps, retained count, truncation, and coarse outcome.
+
+Observe-only does not block this explicit read-only inspection; it still blocks
+every execution route. Emergency stop blocks both preparation and inspection.
+Empty snapshots are valid evidence that the app exposed no supported controls;
+they never trigger broader inspection.
+
 ## Research boundary
 
 Research uses a two-stage approval model:
@@ -276,5 +315,8 @@ after a separate confirmation. It can search approved local name metadata, bind 
 exact result, preview the intended visible Command-Space route, and use a confirmed
 native exact-item fallback. It can also split one exact app lifecycle action from a
 later app goal, confirming only the first while retaining the second as unsupported
-preview text. Network/LLM requests, voice, screen/accessibility-element inspection,
-clicks, typing, media, and generic action generation remain disabled.
+preview text. Finally, it can collect one explicitly approved, bounded, redacted
+Accessibility metadata snapshot from the exact foreground app and render
+non-executable interaction evidence. Network/LLM requests, voice, screen-pixel
+inspection, content/value capture, clicks, typing, media, and generic action
+generation remain disabled.

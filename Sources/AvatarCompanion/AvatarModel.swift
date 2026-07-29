@@ -21,6 +21,14 @@ final class AvatarModel: ObservableObject {
         "Accessibility permission has not been checked."
     @Published var computerUsePreview: ComputerUsePreview?
     @Published private(set) var previewAuditRecords: [PreviewAuditRecord] = []
+    @Published var accessibilityInspectionRequest: AccessibilityInspectionRequest?
+    @Published var accessibilityUISnapshot: AccessibilityUISnapshot?
+    @Published var accessibilityInteractionPreview: AccessibilityInteractionPreview?
+    @Published var accessibilityInspectionStatus =
+        "No Accessibility UI inspection is prepared."
+    @Published private(set) var accessibilityInspectionAuditRecords:
+        [AccessibilityInspectionAuditRecord] = []
+    @Published var accessibilityInspectionRequestConsumed = false
     @Published var pendingApplicationProposal: ApplicationActionProposal?
     @Published var applicationProposalExpiresAt: Date?
     @Published var applicationActionStatus =
@@ -50,6 +58,7 @@ final class AvatarModel: ObservableObject {
     private let gate = ActionGate()
     private let researchGate = ResearchGate()
     private let accessibilityPermission = AccessibilityPermissionController()
+    private let accessibilityUIInspector = AccessibilityUIInspector()
     private let previewAdapter = PreviewOnlyForegroundAdapter()
     private let foregroundComposer = ForegroundCommandComposer()
     private let applicationCommandParser = ApplicationCommandParser()
@@ -63,6 +72,7 @@ final class AvatarModel: ObservableObject {
     private let searchRanker = LocalSearchRanker()
     private let searchScopePolicy = LocalSearchScopePolicy()
     private var consumedConsentGrantIDs = Set<UUID>()
+    private var consumedInspectionRequestIDs = Set<UUID>()
     private var indexedApplications: [ResolvedApplication] = []
     private var personalSearchItems: [LocalSearchItem] = []
 
@@ -201,6 +211,7 @@ final class AvatarModel: ObservableObject {
         spotlightOpenPreview = SpotlightOpenPreview(item: candidate.item)
         previewedAction = nil
         computerUsePreview = nil
+        clearAccessibilityInspection()
         pendingApplicationProposal = nil
         applicationProposalExpiresAt = nil
         pendingLocalItemOpenPlan = nil
@@ -326,6 +337,7 @@ final class AvatarModel: ObservableObject {
         safety.observeOnly = true
         previewedAction = nil
         computerUsePreview = nil
+        clearAccessibilityInspection()
         pendingApplicationProposal = nil
         applicationProposalExpiresAt = nil
         pendingApplicationSequence = nil
@@ -368,6 +380,7 @@ final class AvatarModel: ObservableObject {
         researchRequest = nil
         researchAuthorization = nil
         computerUsePreview = nil
+        clearAccessibilityInspection()
         discoveryStatus =
             "Identified \(displayName) by bundle ID only. No app content was read."
     }
@@ -420,9 +433,12 @@ final class AvatarModel: ObservableObject {
 
     func refreshAccessibilityPermission() {
         accessibilityPermissionGranted = accessibilityPermission.isGranted()
+        if !accessibilityPermissionGranted {
+            clearAccessibilityInspection()
+        }
         accessibilityStatus =
             accessibilityPermissionGranted
-            ? "Accessibility permission granted. Execution remains disabled."
+            ? "Accessibility permission granted. Inspection still needs separate approval; execution remains disabled."
             : "Accessibility permission not granted. Preview remains available."
     }
 
@@ -431,8 +447,203 @@ final class AvatarModel: ObservableObject {
             accessibilityPermission.requestFromUser()
         accessibilityStatus =
             accessibilityPermissionGranted
-            ? "Accessibility permission granted. Execution remains disabled."
+            ? "Accessibility permission granted. Inspection still needs separate approval; execution remains disabled."
             : "macOS permission requested. Approve Avatar Companion in System Settings, then check again."
+    }
+
+    func prepareAccessibilityInspection() {
+        guard !safety.emergencyStopped else {
+            accessibilityInspectionStatus =
+                "Emergency stop blocks inspection preparation."
+            return
+        }
+        guard let app = discoveredApp else {
+            accessibilityInspectionStatus =
+                "Identify the foreground app before preparing inspection."
+            return
+        }
+        guard accessibilityPermissionGranted else {
+            accessibilityInspectionStatus =
+                "Use Check or Request from macOS first. No inspection was prepared."
+            return
+        }
+        guard
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+                == app.bundleIdentifier
+        else {
+            accessibilityInspectionStatus =
+                "Foreground app changed. Identify it again before preparing inspection."
+            return
+        }
+
+        let now = Date()
+        accessibilityInspectionRequest = AccessibilityInspectionRequest(
+            target: app,
+            createdAt: now,
+            expiresAt: now.addingTimeInterval(60)
+        )
+        accessibilityUISnapshot = nil
+        accessibilityInteractionPreview = nil
+        accessibilityInspectionRequestConsumed = false
+        accessibilityInspectionStatus =
+            "Review exact target, 20-control/60-element cap, redaction, and 60-second expiry. Nothing was read yet."
+    }
+
+    func approveAndInspectAccessibility() {
+        guard let request = accessibilityInspectionRequest else {
+            accessibilityInspectionStatus =
+                "Prepare an inspection scope first."
+            return
+        }
+        guard !accessibilityInspectionRequestConsumed else {
+            accessibilityInspectionStatus =
+                "This one-shot inspection was already used. Prepare a new scope."
+            return
+        }
+
+        let now = Date()
+        let permissionGranted = accessibilityPermission.isGranted()
+        accessibilityPermissionGranted = permissionGranted
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        let consent = ConsentGrant(
+            planID: request.id,
+            scopes: [
+                .accessibility(
+                    targetBundleIdentifier:
+                        request.target.bundleIdentifier
+                )
+            ],
+            approvedAt: now,
+            expiresAt: min(
+                request.expiresAt,
+                now.addingTimeInterval(30)
+            ),
+            oneShot: true
+        )
+
+        do {
+            let validated = try AccessibilityInspectionValidator()
+                .validate(
+                    request: request,
+                    consent: consent,
+                    context: AccessibilityInspectionContext(
+                        frontmostBundleIdentifier:
+                            frontmost?.bundleIdentifier,
+                        accessibilityPermissionGranted:
+                            permissionGranted,
+                        emergencyStopped: safety.emergencyStopped,
+                        now: now
+                    ),
+                    userApproved: true
+                )
+            guard
+                consumedInspectionRequestIDs.insert(request.id)
+                    .inserted
+            else {
+                accessibilityInspectionRequestConsumed = true
+                accessibilityInspectionStatus =
+                    "This inspection scope was already consumed."
+                return
+            }
+            accessibilityInspectionRequestConsumed = true
+            accessibilityInspectionAuditRecords.append(
+                AccessibilityInspectionAuditRecord(
+                    requestID: request.id,
+                    targetBundleIdentifier:
+                        request.target.bundleIdentifier,
+                    timestamp: now,
+                    outcome: .started
+                )
+            )
+            guard let processIdentifier = frontmost?.processIdentifier else {
+                recordAccessibilityInspectionFailure(
+                    request: request,
+                    at: now
+                )
+                accessibilityInspectionStatus =
+                    "Exact foreground process became unavailable. Nothing was inspected."
+                return
+            }
+
+            switch accessibilityUIInspector.inspect(
+                processIdentifier: processIdentifier,
+                validated: validated,
+                capturedAt: now
+            ) {
+            case let .success(snapshot):
+                accessibilityUISnapshot = snapshot
+                accessibilityInteractionPreview =
+                    AccessibilityInteractionPreview(
+                        snapshot: snapshot
+                    )
+                accessibilityInspectionAuditRecords.append(
+                    AccessibilityInspectionAuditRecord(
+                        requestID: request.id,
+                        targetBundleIdentifier:
+                            request.target.bundleIdentifier,
+                        timestamp: Date(),
+                        outcome: .succeeded(
+                            controlCount: snapshot.controls.count,
+                            truncated: snapshot.truncated
+                        )
+                    )
+                )
+                accessibilityInspectionStatus =
+                    snapshot.controls.isEmpty
+                    ? "The app exposed no supported accessible controls in this bounded snapshot. No broader or pixel inspection was attempted."
+                    : "Captured \(snapshot.controls.count) redacted control summaries. Evidence preview cannot execute."
+            case .failure(.permissionDenied):
+                recordAccessibilityInspectionFailure(
+                    request: request,
+                    at: Date()
+                )
+                accessibilityInspectionStatus =
+                    "macOS Accessibility permission is unavailable. Prepare a new scope after granting permission."
+            case .failure(.targetNoLongerForeground):
+                recordAccessibilityInspectionFailure(
+                    request: request,
+                    at: Date()
+                )
+                accessibilityInspectionStatus =
+                    "Foreground focus changed during inspection. Partial metadata was discarded."
+            case .failure(.targetUnavailable):
+                recordAccessibilityInspectionFailure(
+                    request: request,
+                    at: Date()
+                )
+                accessibilityInspectionStatus =
+                    "The target exposed no readable Accessibility root. It may not support accessible controls in its current state."
+            case .failure(.inspectionFailed):
+                recordAccessibilityInspectionFailure(
+                    request: request,
+                    at: Date()
+                )
+                accessibilityInspectionStatus =
+                    "Accessibility inspection failed without retaining partial metadata."
+            }
+        } catch AccessibilityInspectionValidationError.targetNotForeground {
+            recordAccessibilityInspectionDenied(request: request, at: now)
+            accessibilityInspectionStatus =
+                "Foreground app no longer matches the approved bundle ID. Nothing was inspected."
+        } catch AccessibilityInspectionValidationError
+            .accessibilityPermissionMissing
+        {
+            recordAccessibilityInspectionDenied(request: request, at: now)
+            accessibilityInspectionStatus =
+                "macOS Accessibility permission is not granted. Nothing was inspected."
+        } catch AccessibilityInspectionValidationError.requestExpired {
+            recordAccessibilityInspectionDenied(request: request, at: now)
+            accessibilityInspectionStatus =
+                "Inspection approval expired. Prepare a new scope."
+        } catch AccessibilityInspectionValidationError.emergencyStopped {
+            recordAccessibilityInspectionDenied(request: request, at: now)
+            accessibilityInspectionStatus =
+                "Emergency stop blocks Accessibility inspection."
+        } catch {
+            recordAccessibilityInspectionDenied(request: request, at: now)
+            accessibilityInspectionStatus =
+                "Inspection preflight rejected the request. Nothing was inspected."
+        }
     }
 
     func confirmApplicationAction() {
@@ -995,6 +1206,45 @@ final class AvatarModel: ObservableObject {
             previewedAction = nil
             command = ""
         }
+    }
+
+    private func clearAccessibilityInspection() {
+        accessibilityInspectionRequest = nil
+        accessibilityUISnapshot = nil
+        accessibilityInteractionPreview = nil
+        accessibilityInspectionRequestConsumed = false
+        accessibilityInspectionStatus =
+            "No Accessibility UI inspection is prepared."
+    }
+
+    private func recordAccessibilityInspectionDenied(
+        request: AccessibilityInspectionRequest,
+        at timestamp: Date
+    ) {
+        accessibilityInspectionAuditRecords.append(
+            AccessibilityInspectionAuditRecord(
+                requestID: request.id,
+                targetBundleIdentifier:
+                    request.target.bundleIdentifier,
+                timestamp: timestamp,
+                outcome: .denied
+            )
+        )
+    }
+
+    private func recordAccessibilityInspectionFailure(
+        request: AccessibilityInspectionRequest,
+        at timestamp: Date
+    ) {
+        accessibilityInspectionAuditRecords.append(
+            AccessibilityInspectionAuditRecord(
+                requestID: request.id,
+                targetBundleIdentifier:
+                    request.target.bundleIdentifier,
+                timestamp: timestamp,
+                outcome: .failed
+            )
+        )
     }
 
     private func researchErrorMessage(_ error: Error) -> String {

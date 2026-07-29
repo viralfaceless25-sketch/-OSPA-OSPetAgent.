@@ -27,8 +27,8 @@ Avatar Companion starts with zero ambient automation authority.
 - Execution preflight rejects focus drift, missing Accessibility permission,
   emergency stop, or expired contracts.
 - Audit events contain contract/plan IDs and redacted outcomes, not raw secrets.
-- No accessibility-element inspection or keyboard/mouse/window event generation
-  ships. Permission request arrives only in milestone 3.
+- At milestone 2, no accessibility-element inspection or keyboard/mouse/window
+  event generation ships. Permission request arrives only in milestone 3.
 
 ## Milestone 3 permission and preview boundary
 
@@ -44,7 +44,7 @@ Avatar Companion starts with zero ambient automation authority.
 - `PreviewOnlyForegroundAdapter` has no execute method and always returns
   `executionEnabled = false`.
 - Preview readiness reports focus drift, missing permission, emergency stop, and
-  expiry. It reads no screen or accessibility-element content.
+  expiry. This milestone reads no screen or accessibility-element content.
 
 Real event generation requires a future explicit product milestone, executable
 adapter review, user-granted Accessibility permission, action-mode opt-in,
@@ -95,9 +95,9 @@ Only exact-name app launch and switch commands are executable.
 - Emergency stop clears every pending native action immediately. A single launch
   request already handed to macOS cannot be recalled, but no follow-on step exists.
 
-No clicks, typing, accessibility-element reads, screen capture, media playback,
-browser/site interaction, network research, voice, or generic command execution
-is enabled.
+Milestone 5 enables no clicks, typing, accessibility-element reads, screen capture,
+media playback, browser/site interaction, network research, voice, or generic
+command execution.
 
 macOS Accessibility permission is process-wide. Future computer-use code must apply
 stricter internal per-app targeting on every step. OS permission alone is never
@@ -158,6 +158,35 @@ is unavailable.
 No browser automation, Netflix/site login, catalog lookup, content playback, media
 control, screen/UI inspection, mouse/keyboard injection, voice, network/LLM, or
 arbitrary multi-action executor is added.
+
+## Milestone 8 scoped Accessibility evidence
+
+- Permission status and prompt remain separate explicit buttons. Granting
+  Accessibility permission alone performs no inspection and grants no execution.
+- **Prepare inspection scope** binds a 60-second request to the exact identified
+  foreground bundle ID. It reads nothing.
+- **Approve and inspect once** creates fresh 30-second, one-shot consent for exactly
+  `.accessibility(targetBundleIdentifier:)`.
+- Preflight requires current permission, exact foreground bundle ID, live PID,
+  unexpired request/consent, unused request ID, and no emergency stop.
+- System source verifies exact foreground PID before and during traversal. Focus
+  drift discards all partial metadata.
+- Traversal visits at most 60 elements to depth 4 with a 0.5-second AX messaging
+  timeout. At most 20 supported interactive controls survive.
+- Only role, `AXTitle` or `AXDescription`, and supported action names are requested.
+  `AXValue`, selected text, document/static text, and pixels are never requested.
+- Unknown roles/actions are dropped. Unknown labels become `[redacted label]`
+  before retained snapshot storage; only generic control labels on a closed
+  allowlist survive.
+- Snapshot and evidence are in memory, expire with the request, and cannot create
+  `ExecutionContract`. No perform-action API exists in the inspector.
+- Audit keeps IDs, target bundle ID, timestamps, control count, truncation, and
+  outcome. It stores no labels, values, command text, or raw AX errors.
+- Apps exposing no compatible controls get an explicit empty result. No wider
+  traversal, screen capture, browser fallback, or network lookup occurs.
+
+This milestone adds read-only UI metadata inspection, not interaction. It generates
+no click, key, pointer, window, media, login, or browser action.
 
 ## Capability policy
 
