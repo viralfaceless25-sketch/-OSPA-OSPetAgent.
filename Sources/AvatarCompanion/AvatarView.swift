@@ -102,7 +102,7 @@ struct AvatarView: View {
             }
 
             HStack(spacing: 8) {
-                TextField("Try “focus this app”", text: $model.command)
+                TextField("Try “open Safari”", text: $model.command)
                     .textFieldStyle(.roundedBorder)
                     .focused($commandFocused)
                     .onSubmit(model.previewCommand)
@@ -120,6 +120,20 @@ struct AvatarView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityLabel("Status: \(model.status)")
+
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "app.dashed")
+                Text(model.applicationActionStatus)
+                Spacer()
+                Text("Audit \(model.applicationAuditEvents.count)")
+                    .monospacedDigit()
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if let proposal = model.pendingApplicationProposal {
+                executableApplicationCard(proposal)
+            }
 
             if let action = model.previewedAction {
                 VStack(alignment: .leading, spacing: 8) {
@@ -182,6 +196,82 @@ struct AvatarView: View {
         .padding(16)
         .onAppear {
             commandFocused = true
+        }
+    }
+
+    private func executableApplicationCard(
+        _ proposal: ApplicationActionProposal
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(
+                "Executable native app action",
+                systemImage: "bolt.shield"
+            )
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.green)
+
+            Text(
+                "Target: \(proposal.application.identity.displayName) (\(proposal.application.identity.bundleIdentifier))"
+            )
+            .font(.caption)
+            .textSelection(.enabled)
+
+            ForEach(proposal.plan.steps) { step in
+                Text(step.visibleInteraction?.previewDescription ?? step.effectPreview)
+                    .font(.caption)
+                Text("Effect: \(step.effectPreview)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Permissions: none. Mechanism: native macOS app activation.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let expiry = model.applicationProposalExpiresAt {
+                Text(
+                    "Preview expires: \(expiry.formatted(date: .omitted, time: .standard))"
+                )
+                .font(.caption)
+            }
+
+            Text(model.applicationActionStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button {
+                model.confirmApplicationAction()
+            } label: {
+                Text(
+                    proposal.command.operation == .switchToRunning
+                        ? "Confirm switch"
+                        : "Confirm open"
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(
+                model.safety.observeOnly
+                    || model.safety.emergencyStopped
+                    || model.isExecutingApplicationAction
+            )
+
+            if model.safety.observeOnly {
+                Text("Turn off Observe only to enable this one confirmation.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            Text("Redacted execution audit events: \(model.applicationAuditEvents.count)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(.green.opacity(0.25))
         }
     }
 

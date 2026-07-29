@@ -1,5 +1,6 @@
 import AppKit
 import AvatarCore
+import AvatarPlatform
 import Foundation
 
 @MainActor
@@ -20,6 +21,12 @@ final class AvatarModel: ObservableObject {
         "Accessibility permission has not been checked."
     @Published var computerUsePreview: ComputerUsePreview?
     @Published private(set) var previewAuditRecords: [PreviewAuditRecord] = []
+    @Published var pendingApplicationProposal: ApplicationActionProposal?
+    @Published var applicationProposalExpiresAt: Date?
+    @Published var applicationActionStatus =
+        "Executable app commands: “open Safari” or “switch to Notes”."
+    @Published private(set) var applicationAuditEvents: [AuditEvent] = []
+    @Published var isExecutingApplicationAction = false
 
     var onExpansionChanged: ((Bool) -> Void)?
     var onHide: (() -> Void)?
@@ -30,6 +37,11 @@ final class AvatarModel: ObservableObject {
     private let accessibilityPermission = AccessibilityPermissionController()
     private let previewAdapter = PreviewOnlyForegroundAdapter()
     private let foregroundComposer = ForegroundCommandComposer()
+    private let applicationCommandParser = ApplicationCommandParser()
+    private let applicationResolver = InstalledApplicationResolver()
+    private let applicationPlanner = ApplicationActionPlanner()
+    private let nativeApplicationExecutor = NativeApplicationExecutor()
+    private var consumedConsentGrantIDs = Set<UUID>()
 
     func toggleExpanded() {
         isExpanded.toggle()
@@ -37,6 +49,20 @@ final class AvatarModel: ObservableObject {
     }
 
     func previewCommand() {
+        switch applicationCommandParser.parse(command) {
+        case let .command(parsed):
+            previewApplicationCommand(parsed)
+            return
+        case let .rejected(reason):
+            previewedAction = nil
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            status = "Unsupported executable command: \(reason)"
+            return
+        case .notApplicationCommand:
+            break
+        }
+
         switch interpreter.interpret(command) {
         case .help:
             previewedAction = nil
@@ -44,9 +70,13 @@ final class AvatarModel: ObservableObject {
                 "Try “copy time”, “focus this app”, “preview save”, or “preview find”."
         case .rejected:
             previewedAction = nil
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
             composeForegroundCommand()
         case let .action(action):
             previewedAction = action
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
             switch gate.evaluate(action, state: safety, userConfirmed: false) {
             case let .denied(reason):
                 status = "\(action.preview) \(reason)"
@@ -88,7 +118,10 @@ final class AvatarModel: ObservableObject {
         safety.observeOnly = true
         previewedAction = nil
         computerUsePreview = nil
+        pendingApplicationProposal = nil
+        applicationProposalExpiresAt = nil
         command = ""
+        applicationActionStatus = "Emergency stop active. Pending app action cleared."
         status = "Stopped. All actions blocked."
     }
 
@@ -182,6 +215,124 @@ final class AvatarModel: ObservableObject {
             : "macOS permission requested. Approve Avatar Companion in System Settings, then check again."
     }
 
+    func confirmApplicationAction() {
+        guard let proposal = pendingApplicationProposal else {
+            applicationActionStatus = "Preview an executable app command first."
+            return
+        }
+
+        let now = Date()
+        guard
+            let proposalExpiry = applicationProposalExpiresAt,
+            now < proposalExpiry
+        else {
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            applicationActionStatus = "Preview expired. Create it again."
+            return
+        }
+        do {
+            let currentApplication = try applicationResolver.resolveExact(
+                named: proposal.command.requestedApplicationName
+            )
+            guard currentApplication.identity == proposal.application.identity else {
+                applicationActionStatus =
+                    "Installed app identity changed. Preview again."
+                pendingApplicationProposal = nil
+                applicationProposalExpiresAt = nil
+                return
+            }
+            if proposal.command.operation == .switchToRunning,
+                !currentApplication.isRunning
+            {
+                applicationActionStatus =
+                    "Target app stopped running. Preview again."
+                pendingApplicationProposal = nil
+                applicationProposalExpiresAt = nil
+                return
+            }
+
+            let executionProposal = ApplicationActionProposal(
+                command: proposal.command,
+                application: currentApplication,
+                profile: proposal.profile,
+                plan: proposal.plan
+            )
+            let consent = ConsentGrant(
+                planID: proposal.plan.id,
+                scopes: [],
+                approvedAt: now,
+                expiresAt: now.addingTimeInterval(30),
+                oneShot: true
+            )
+            let validated = try PlanValidator().validate(
+                plan: proposal.plan,
+                profile: proposal.profile,
+                consent: consent,
+                safety: safety,
+                userConfirmedPreview: true,
+                now: now
+            )
+            guard consumedConsentGrantIDs.insert(consent.id).inserted else {
+                applicationActionStatus = "One-shot consent was already used."
+                return
+            }
+
+            let contract = ExecutionContract(
+                validatedPlan: validated,
+                issuedAt: now,
+                expiresAt: consent.expiresAt
+            )
+            applicationAuditEvents.append(
+                AuditEvent(
+                    contractID: contract.id,
+                    planID: proposal.plan.id,
+                    timestamp: now,
+                    outcome: .started
+                )
+            )
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            isExecutingApplicationAction = true
+            applicationActionStatus =
+                "macOS is performing one native app action. No input events are generated."
+
+            nativeApplicationExecutor.execute(
+                proposal: executionProposal,
+                contract: contract,
+                emergencyStopped: safety.emergencyStopped
+            ) { [weak self] outcome in
+                guard let self else { return }
+                self.isExecutingApplicationAction = false
+                self.applicationAuditEvents.append(
+                    AuditEvent(
+                        contractID: contract.id,
+                        planID: proposal.plan.id,
+                        timestamp: Date(),
+                        outcome: self.redactedAuditOutcome(outcome)
+                    )
+                )
+                self.applicationActionStatus =
+                    self.applicationOutcomeMessage(
+                        outcome,
+                        appName:
+                            executionProposal.application.identity.displayName
+                    )
+            }
+        } catch PlanValidationError.observeOnly {
+            applicationActionStatus =
+                "Observe-only mode blocks execution. Turn it off, then confirm again."
+        } catch PlanValidationError.emergencyStopped {
+            applicationActionStatus =
+                "Emergency stop blocks execution."
+        } catch {
+            applicationActionStatus =
+                "Action changed or expired. Preview it again."
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+        }
+    }
+
     func buildPreviewOnlyComputerUsePlan() {
         guard let app = discoveredApp else {
             discoveryStatus = "Identify an app before building a preview."
@@ -227,6 +378,63 @@ final class AvatarModel: ObservableObject {
         case let .unsupported(reason):
             computerUsePreview = nil
             status = "Unsupported request: \(reason)"
+        }
+    }
+
+    private func previewApplicationCommand(
+        _ parsed: ParsedApplicationCommand
+    ) {
+        previewedAction = nil
+        computerUsePreview = nil
+
+        do {
+            let application = try applicationResolver.resolveExact(
+                named: parsed.requestedApplicationName
+            )
+            let proposal = try applicationPlanner.propose(
+                command: parsed,
+                application: application,
+                now: Date()
+            )
+            let previewConsent = ConsentGrant(
+                planID: proposal.plan.id,
+                scopes: [],
+                approvedAt: Date(),
+                expiresAt: Date().addingTimeInterval(60)
+            )
+            _ = try PlanValidator().validateForPreview(
+                plan: proposal.plan,
+                profile: proposal.profile,
+                consent: previewConsent,
+                userConfirmedPreview: true,
+                now: Date()
+            )
+
+            pendingApplicationProposal = proposal
+            applicationProposalExpiresAt = Date().addingTimeInterval(60)
+            status =
+                "Executable native app action prepared. Review exact target and confirm separately."
+            applicationActionStatus =
+                "Ready for one explicit confirmation. No Accessibility permission is required."
+        } catch InstalledApplicationResolutionError.notFound {
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            status =
+                "No installed app found with that exact name."
+        } catch InstalledApplicationResolutionError.ambiguousExactName {
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            status =
+                "Multiple installed apps share that exact name. This narrow milestone refuses ambiguous targets."
+        } catch ApplicationProposalError.switchTargetNotRunning {
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            status =
+                "Switch requires an already-running app. Use “open \(parsed.requestedApplicationName)” instead."
+        } catch {
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            status = "Application action could not be planned safely."
         }
     }
 
@@ -340,6 +548,41 @@ final class AvatarModel: ObservableObject {
             "Document limit must be between 1 and 10."
         default:
             "Research scope could not be prepared."
+        }
+    }
+
+    private func redactedAuditOutcome(
+        _ outcome: ExecutionOutcome
+    ) -> ExecutionOutcome {
+        switch outcome {
+        case .started:
+            .started
+        case .succeeded:
+            .succeeded
+        case .cancelled:
+            .cancelled
+        case .denied:
+            .denied("Native app action denied.")
+        case .failed:
+            .failed("Native app action failed.")
+        }
+    }
+
+    private func applicationOutcomeMessage(
+        _ outcome: ExecutionOutcome,
+        appName: String
+    ) -> String {
+        switch outcome {
+        case .succeeded:
+            "\(appName) is now opening or foreground."
+        case let .denied(reason):
+            "Action denied: \(reason)"
+        case let .failed(reason):
+            "Action failed: \(reason)"
+        case .cancelled:
+            "Action cancelled."
+        case .started:
+            "Action started."
         }
     }
 }

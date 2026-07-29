@@ -26,10 +26,14 @@ planning, consent, and audit contracts without enabling live automation.
 - Typed, non-executable visible-step previews with readiness blockers
 - Deterministic foreground-context natural-language command composer
 - In-memory redacted preview audit records
+- Exact-name native app launch and foreground switching
+- Separate executable-action card with per-action confirmation and audit
 
 No credentials, screen capture, accessibility-element inspection, input generation,
-files, network fetch, shell, AppleScript, or global keyboard monitoring are used.
-Accessibility is checked or requested only after selecting the corresponding button.
+user-document access, network fetch, shell, AppleScript, or global keyboard
+monitoring are used. App resolution reads bundle metadata only from running apps
+and standard macOS Applications folders. Accessibility is checked or requested only
+after selecting the corresponding button.
 
 ## Requirements
 
@@ -101,6 +105,29 @@ them. Requests with multiple intents, unknown behavior, or high-impact verbs suc
 as send, delete, publish, or quit are rejected with a specific explanation.
 Changing foreground apps after identification also blocks composition.
 
+## Open or switch applications
+
+Executable commands use exact locally installed application display names:
+
+```text
+open Safari
+launch TextEdit
+switch to Notes
+focus Finder
+```
+
+1. Enter one command and select **Preview**.
+2. Confirm the green card says **Executable native app action** and review exact
+   app name, bundle ID, effect, mechanism, and 60-second preview expiry.
+3. Turn off **Observe only**.
+4. Select **Confirm open** or **Confirm switch**.
+
+Confirmation creates fresh 30-second, one-shot consent. `switch` works only for an
+already-running app; `open` launches or activates. Resolution accepts no paths,
+`.app` suffixes, multiple targets, documents, URLs, or fuzzy names. Execution uses
+native `NSWorkspace`/`NSRunningApplication` activation and needs no Accessibility
+permission. Started/result audit events contain generated IDs and redacted outcome.
+
 ## Architecture
 
 ```text
@@ -128,6 +155,11 @@ Command palette ── ForegroundCommandComposer (local allowlist)
         │ exact AppIdentity + typed intent
         ▼
 PreviewValidatedPlan ── preview contract ── redacted audit record
+
+Exact app command ── installed-app metadata catalog ── green preview
+        │ separate confirmation + action mode
+        ▼
+ExecutionContract ── native NSWorkspace activation ── redacted audit
 ```
 
 `AvatarCore` has no AppKit dependency. UI and side-effect code live in the
@@ -139,8 +171,9 @@ executable target. See [SECURITY.md](SECURITY.md) and
 Real computer use requires a later, separately reviewed executable adapter plus all
 of these user actions: grant macOS Accessibility permission, disable observe-only,
 review an evidence-backed capability profile, approve an exact expiring plan, and
-confirm meaningful effects. Current build cannot generate events even when
-Accessibility permission is granted.
+confirm meaningful effects. Current build cannot generate keyboard or mouse events
+even when Accessibility permission is granted. Its only foreground app execution
+is exact-name native launch/activation.
 
 ## License
 

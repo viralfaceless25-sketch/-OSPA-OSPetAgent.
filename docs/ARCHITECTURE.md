@@ -42,6 +42,11 @@ Command text ── local closed-intent composer ── exact AppIdentity
   │ supported typed recipe only
   ▼
 PreviewValidatedPlan ── preview contract ── redacted PreviewAuditRecord
+
+Exact app name ── standard app catalog ── ApplicationActionProposal
+  │ action mode + separate confirmation
+  ▼
+ExecutionContract ── NativeApplicationExecutor ── redacted AuditEvent
 ```
 
 Every arrow is a code boundary. Web content cannot call tools, modify policy,
@@ -125,6 +130,29 @@ ID, plan ID, target bundle ID, timestamp, and readiness issues. It contains no
 command text, screen data, or event payload. Emergency stop clears the active
 preview while retaining audit history.
 
+## Native application launch and switching
+
+This is first real foreground executor. Scope remains one native app-lifecycle
+operation:
+
+1. `ApplicationCommandParser` accepts one explicit operation and display name.
+2. `InstalledApplicationResolver` catalogs running apps plus standard system,
+   local, and user Applications folders. It reads bundle name, bundle ID, and URL
+   only, caches results, and requires one exact display-name match.
+3. `ApplicationActionPlanner` produces one `.nativeAPI` capability and one typed
+   launch/activate step. No Accessibility permission scope is requested.
+4. Green executable preview shows exact target/effect and expires in 60 seconds.
+5. Separate confirmation while action mode is enabled creates fresh 30-second
+   one-shot consent and `ExecutionContract`.
+6. `NativeApplicationExecutor` rechecks target, plan, stop, and expiry, then calls
+   `NSWorkspace.openApplication` or `NSRunningApplication.activate`.
+7. In-memory audit records started and redacted terminal outcome.
+
+Switch refuses a stopped app. Open may launch or activate. Paths, documents, URLs,
+fuzzy names, duplicate exact names, multi-actions, and arbitrary Launch Services
+requests never enter the plan. The native executor contains no keyboard, pointer,
+Accessibility-element, browser, media, or scripting API.
+
 ## Research boundary
 
 Research uses a two-stage approval model:
@@ -160,5 +188,7 @@ or researched instruction text belongs in an execution contract.
 The avatar can identify the foreground app, stage an official documentation
 research scope, show exact limits, record explicit approval, check/request macOS
 Accessibility trust, compose three local foreground intents, and render a scoped
-illustrative plan. Network/LLM requests, voice, screen/accessibility-element
-inspection, and action generation remain disabled.
+illustrative plan. It can also launch or foreground one exactly named local app
+after a separate confirmation. Network/LLM requests, voice, screen/accessibility-
+element inspection, clicks, typing, media, and generic action generation remain
+disabled.

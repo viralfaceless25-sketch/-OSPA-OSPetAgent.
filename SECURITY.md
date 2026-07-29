@@ -69,6 +69,36 @@ evidence-backed profile, exact plan approval, and meaningful-action confirmation
 This milestone adds no voice, screen inspection, network/LLM request,
 accessibility-element read, keyboard/mouse injection, or foreground executor.
 
+## Milestone 5 native application execution
+
+Only exact-name app launch and switch commands are executable.
+
+- Parser accepts one `open`, `launch`, `start`, `switch to`, `focus`, or `activate`
+  command plus one application display name.
+- Paths, `.app` suffixes, control characters, and multi-actions are rejected.
+- Resolver reads bundle metadata only from running apps and standard local, system,
+  and user Applications folders; it does not read user documents.
+- Display-name matching is exact after case/diacritic normalization. Duplicate
+  exact names are rejected.
+- `switch` requires an already-running target. `open` launches or activates.
+- Preview is clearly marked executable, names exact bundle ID/effect/mechanism, and
+  expires after 60 seconds.
+- Confirmation requires action mode and creates fresh 30-second, one-shot consent.
+- Consent has no permissions because native app activation requires no
+  Accessibility grant.
+- Executor accepts only a validated `ExecutionContract` whose target and plan match
+  the resolved application.
+- Execution calls native `NSWorkspace.openApplication` or
+  `NSRunningApplication.activate`; it never emits keyboard or pointer events.
+- Audit records started and terminal outcomes with contract/plan IDs. Native error
+  detail is redacted from audit.
+- Emergency stop clears every pending native action immediately. A single launch
+  request already handed to macOS cannot be recalled, but no follow-on step exists.
+
+No clicks, typing, accessibility-element reads, screen capture, media playback,
+browser/site interaction, network research, voice, or generic command execution
+is enabled.
+
 macOS Accessibility permission is process-wide. Future computer-use code must apply
 stricter internal per-app targeting on every step. OS permission alone is never
 treated as consent.

@@ -18,12 +18,15 @@ public enum ModifierKey: String, Equatable, Hashable, Sendable {
 
 /// Typed description only. It contains no event-generation implementation.
 public enum VisibleInteraction: Equatable, Sendable {
+    case launchOrActivateApplication
     case activateTargetApplication
     case keyboardShortcut(key: String, modifiers: Set<ModifierKey>)
     case accessibilityPress(role: String, label: String)
 
     public var previewDescription: String {
         switch self {
+        case .launchOrActivateApplication:
+            return "Launch the exact application if needed, then bring it to the foreground."
         case .activateTargetApplication:
             return "Bring the exact target application to the foreground."
         case let .keyboardShortcut(key, modifiers):
