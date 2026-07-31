@@ -103,7 +103,7 @@ public final class SystemAccessibilityActionPerformer: AccessibilityActionPerfor
                 let elementLabel =
                     attributeString(current.element, kAXTitleAttribute as CFString)
                     ?? attributeString(current.element, kAXDescriptionAttribute as CFString)
-                if elementLabel == label {
+                if Self.normalized(elementLabel) == Self.normalized(label) {
                     return current.element
                 }
             }
@@ -115,6 +115,19 @@ public final class SystemAccessibilityActionPerformer: AccessibilityActionPerfor
             queue.append(contentsOf: children.map { ($0, current.depth + 1) })
         }
         return nil
+    }
+
+    /// Matches the inspection redactor's label normalization so a plan built
+    /// from a sanitized snapshot ("Play") still resolves the live element
+    /// whatever its casing or internal spacing ("play", "  PLAY ").
+    static func normalized(_ label: String?) -> String? {
+        guard let label else { return nil }
+        let value =
+            label
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .lowercased()
+        return value.isEmpty ? nil : value
     }
 
     private func attributeString(

@@ -129,6 +129,20 @@ struct RealForegroundInputAdapterTests {
         #expect(deps.keyboard.calls.isEmpty)
     }
 
+    @Test("Label matching normalizes case and whitespace like the redactor")
+    func normalizesLabels() {
+        let performer = SystemAccessibilityActionPerformer.self
+        #expect(performer.normalized("Play") == performer.normalized("play"))
+        #expect(performer.normalized("  PLAY ") == performer.normalized("Play"))
+        #expect(
+            performer.normalized("Continue  watching")
+                == performer.normalized("Continue watching")
+        )
+        #expect(performer.normalized("   ") == nil)
+        #expect(performer.normalized(nil) == nil)
+        #expect(performer.normalized("Play") != performer.normalized("Pause"))
+    }
+
     // MARK: - Fixture
 
     private func makeContract(

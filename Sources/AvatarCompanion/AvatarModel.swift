@@ -457,7 +457,7 @@ final class AvatarModel: ObservableObject {
         }
         accessibilityStatus =
             accessibilityPermissionGranted
-            ? "Accessibility permission granted. Inspection still needs separate approval; execution remains disabled."
+            ? "Accessibility permission granted. Inspection and any action each still need separate approval."
             : "Accessibility permission not granted. Preview remains available."
     }
 
@@ -466,7 +466,7 @@ final class AvatarModel: ObservableObject {
             accessibilityPermission.requestFromUser()
         accessibilityStatus =
             accessibilityPermissionGranted
-            ? "Accessibility permission granted. Inspection still needs separate approval; execution remains disabled."
+            ? "Accessibility permission granted. Inspection and any action each still need separate approval."
             : "macOS permission requested. Approve Avatar Companion in System Settings, then check again."
     }
 

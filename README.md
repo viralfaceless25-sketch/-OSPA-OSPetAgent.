@@ -37,13 +37,22 @@ native opening plus explicit, read-only Accessibility evidence collection.
 - Explicitly deferred, non-executable app-specific follow-up goals
 - One-shot, exact-foreground Accessibility UI inspection
 - Bounded, allowlisted, redacted control/action evidence and preview
+- Confirmed real execution of typed visible steps through Accessibility actions
+  and one bounded keyboard chord
 
-No credentials, screen capture, input generation, file-content reads, network
-fetch, shell, AppleScript, or global keyboard monitoring are used. Accessibility
-inspection reads only a bounded allowlist of interactive metadata after two
-explicit user steps; unknown labels are discarded before snapshot storage. Search
-reads only local name/path/type metadata from user-approved scopes. Accessibility
-is checked or requested only after selecting the corresponding button.
+No credentials, screen capture, file-content reads, network fetch, shell,
+AppleScript, or global keyboard monitoring are used. Accessibility inspection
+reads only a bounded allowlist of interactive metadata after two explicit user
+steps; unknown labels are discarded before snapshot storage. Search reads only
+local name/path/type metadata from user-approved scopes. Accessibility is checked
+or requested only after selecting the corresponding button.
+
+Input events are generated in exactly one place: a plan the user explicitly
+confirmed, executed under a one-shot contract that expires in 30 seconds. Element
+presses go through `AXUIElementPerformAction` and never through screen
+coordinates; the only synthesized input is a single `CGEvent` keyboard chord from
+a closed key allowlist. Observe-only is still the default, and emergency stop
+still blocks planning and execution. See **Try real execution**.
 
 ## Requirements
 
@@ -87,7 +96,7 @@ identity, hardened runtime, notarization, and a unique bundle identifier.
 
 Approval is demonstrable state only. No page is fetched in this milestone.
 
-## Try preview-only computer use
+## Try computer-use planning
 
 1. Identify a foreground app.
 2. Select **Check** to read current Accessibility trust without prompting.
@@ -96,7 +105,42 @@ Approval is demonstrable state only. No page is fetched in this milestone.
 5. Review exact app target, two typed visible steps, and readiness blockers.
 
 The Command-S example is explicitly illustrative, not a learned universal shortcut.
-The preview adapter has no execute method and always reports execution disabled.
+Rendering the plan never runs it: `PreviewOnlyForegroundAdapter` has no execute
+method. Running it requires the separate confirmation below.
+
+## Try real execution
+
+Only this flow generates input events. It stays behind every existing gate.
+
+1. Bring the target app forward and identify it.
+2. Grant Accessibility permission (**Check**, then **Request from macOS** if needed).
+3. Turn off **Observe only**.
+4. Build a plan — `focus this app`, or **Create preview-only ⌘S plan**.
+5. Review the steps and confirm the readiness line reads *permission and
+   foreground target match*.
+6. Select **Confirm and run these steps**.
+
+The button stays disabled unless a plan is pending, no readiness issue is open,
+observe-only is off, emergency stop is clear, and the 60-second preview has not
+expired. Confirming issues a fresh 30-second, one-shot `ExecutionContract`.
+
+`RealForegroundInputAdapter` then re-runs the full preflight itself rather than
+trusting the caller, burns the one-shot consent through `ConsentUseLedger`, and
+re-checks expiry, emergency stop, and exact foreground bundle ID before *every*
+step. Focus drift mid-plan stops the run. Confirming the same plan twice is
+refused: the consent is already spent.
+
+Steps execute by type. `accessibilityPress` resolves the element by role and
+label in the live Accessibility tree, verifies it advertises `AXPress`, and calls
+`AXUIElementPerformAction` — no screen coordinates are ever computed.
+`keyboardShortcut` is the only path that synthesizes input, posting one bounded
+`CGEvent` chord from a closed key allowlist. Activation steps reuse the native
+workspace and generate no events.
+
+Audit records keep outcome shape, contract ID, and plan ID only. Failure reasons
+can name an on-screen control, so they appear in the status line and never in the
+audit record. Accessibility is the only permission required; Input Monitoring is
+not requested, because the app posts events and never taps them.
 
 ## Inspect one exact foreground app
 
