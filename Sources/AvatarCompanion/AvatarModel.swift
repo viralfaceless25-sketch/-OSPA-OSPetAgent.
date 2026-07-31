@@ -23,6 +23,11 @@ final class AvatarModel: ObservableObject {
     @Published private(set) var previewAuditRecords: [PreviewAuditRecord] = []
     @Published private(set) var computerUseAuditEvents: [AuditEvent] = []
     @Published var isExecutingComputerUseAction = false
+    @Published var pendingTaskSequence: TaskSequence?
+    @Published private(set) var taskSequenceOutcomes: [TaskSequenceStepOutcome] = []
+    @Published var isExecutingTaskSequence = false
+    @Published var taskSequenceStatus =
+        "Ask for two or three things at once, like “open Safari and open Notes”."
     @Published var computerUseActionStatus =
         "No visible foreground action is pending."
     @Published var accessibilityInspectionRequest: AccessibilityInspectionRequest?
@@ -87,6 +92,9 @@ final class AvatarModel: ObservableObject {
         activationPerformer: SystemForegroundActivationPerformer(),
         consentLedger: computerUseConsentLedger
     )
+    private let taskSequenceCommandParser = TaskSequenceCommandParser()
+    private let taskSequenceValidator = TaskSequenceValidator()
+    private let taskSequenceRunner = TaskSequenceRunner()
     private var pendingComputerUsePlan: ActionPlan?
     private var pendingComputerUseProfile: CapabilityProfile?
     private var consumedConsentGrantIDs = Set<UUID>()
@@ -271,6 +279,22 @@ final class AvatarModel: ObservableObject {
         pendingLocalItemOpenPlan = nil
         pendingApplicationSequence = nil
         applicationSequenceFirstStepCompleted = false
+        pendingTaskSequence = nil
+
+        // A request whose every clause is executable becomes one ordered chain.
+        // Anything else falls through to the existing single-command and
+        // deferred-goal handling below.
+        switch taskSequenceCommandParser.parse(command) {
+        case let .sequence(commands):
+            previewTaskSequence(commands)
+            return
+        case let .rejected(reason):
+            previewedAction = nil
+            status = "Multi-step request rejected: \(reason)"
+            return
+        case .notSequence:
+            break
+        }
 
         switch applicationSequenceParser.parse(command) {
         case let .sequence(sequence):
@@ -360,6 +384,9 @@ final class AvatarModel: ObservableObject {
         applicationProposalExpiresAt = nil
         pendingApplicationSequence = nil
         applicationSequenceFirstStepCompleted = false
+        pendingTaskSequence = nil
+        taskSequenceStatus =
+            "Emergency stop active. Pending multi-step request cleared."
         pendingLocalItemOpenPlan = nil
         spotlightOpenPreview = nil
         searchAuthorization = nil
@@ -899,6 +926,181 @@ final class AvatarModel: ObservableObject {
             pendingLocalItemOpenPlan = nil
             localItemActionStatus =
                 "Exact-item preflight changed. Search and select again."
+        }
+    }
+
+    var taskSequenceExecutionReady: Bool {
+        guard let sequence = pendingTaskSequence,
+            !safety.observeOnly,
+            !safety.emergencyStopped,
+            !isExecutingTaskSequence
+        else {
+            return false
+        }
+        return Date() < sequence.expiresAt
+    }
+
+    /// Builds one ordered chain from a multi-clause request. Nothing runs here;
+    /// the user sees every step first and confirms the chain as a whole.
+    private func previewTaskSequence(
+        _ commands: [ParsedApplicationCommand]
+    ) {
+        previewedAction = nil
+        clearPendingComputerUsePlan()
+        pendingApplicationProposal = nil
+        applicationProposalExpiresAt = nil
+        pendingApplicationSequence = nil
+        applicationSequenceFirstStepCompleted = false
+        taskSequenceOutcomes = []
+
+        let now = Date()
+        var steps: [SequencedPlan] = []
+
+        for (index, command) in commands.enumerated() {
+            do {
+                let application = try applicationResolver.resolveExact(
+                    named: command.requestedApplicationName
+                )
+                let proposal = try applicationPlanner.propose(
+                    command: command,
+                    application: application,
+                    now: now
+                )
+                steps.append(
+                    SequencedPlan(
+                        summary:
+                            "\(command.operation == .switchToRunning ? "Switch to" : "Open") \(application.identity.displayName)",
+                        plan: proposal.plan,
+                        profile: proposal.profile
+                    )
+                )
+            } catch {
+                pendingTaskSequence = nil
+                taskSequenceStatus = taskSequenceStepFailureMessage(
+                    error,
+                    index: index,
+                    total: commands.count,
+                    requestedName: command.requestedApplicationName
+                )
+                status = "That multi-step request was not prepared."
+                return
+            }
+        }
+
+        pendingTaskSequence = TaskSequence(
+            steps: steps,
+            createdAt: now,
+            expiresAt: now.addingTimeInterval(60)
+        )
+        status =
+            "Prepared \(steps.count) requests. Review them, then confirm once to run them in order."
+        taskSequenceStatus =
+            "Nothing runs until you confirm. Each step is checked again as it starts."
+    }
+
+    func confirmTaskSequence() {
+        guard let sequence = pendingTaskSequence else {
+            taskSequenceStatus = "Prepare a multi-step request first."
+            return
+        }
+
+        do {
+            let validated = try taskSequenceValidator.validate(
+                sequence: sequence,
+                safety: safety,
+                userConfirmed: true,
+                now: Date()
+            )
+            pendingTaskSequence = nil
+            taskSequenceOutcomes = []
+            isExecutingTaskSequence = true
+            taskSequenceStatus =
+                "Running \(validated.sequence.steps.count) requests in order…"
+
+            let adapter = computerUseAdapter
+            Task { [weak self] in
+                guard let self else { return }
+                let result = await taskSequenceRunner.run(
+                    validated,
+                    adapter: adapter,
+                    isEmergencyStopped: { [weak self] in
+                        await self?.safety.emergencyStopped ?? true
+                    },
+                    now: { Date() },
+                    onStepOutcome: { [weak self] outcome in
+                        await self?.appendTaskSequenceOutcome(outcome)
+                    }
+                )
+                self.isExecutingTaskSequence = false
+                self.taskSequenceStatus = self.taskSequenceResultMessage(result)
+            }
+        } catch TaskSequenceValidationError.observeOnly {
+            taskSequenceStatus =
+                "Observe-only mode blocks execution. Turn it off, then confirm again."
+        } catch TaskSequenceValidationError.emergencyStopped {
+            taskSequenceStatus = "Emergency stop blocks execution."
+        } catch TaskSequenceValidationError.sequenceExpired {
+            pendingTaskSequence = nil
+            taskSequenceStatus = "That request expired. Ask again."
+        } catch let TaskSequenceValidationError.stepRejected(index) {
+            pendingTaskSequence = nil
+            taskSequenceStatus =
+                "Request \(index + 1) is no longer valid. Ask again."
+        } catch {
+            pendingTaskSequence = nil
+            taskSequenceStatus = "That request could not be prepared safely."
+        }
+    }
+
+    private func appendTaskSequenceOutcome(_ outcome: TaskSequenceStepOutcome) {
+        taskSequenceOutcomes.append(outcome)
+        computerUseAuditEvents.append(
+            AuditEvent(
+                contractID: UUID(),
+                planID: outcome.planID,
+                timestamp: Date(),
+                outcome: redactedComputerUseOutcome(outcome.outcome)
+            )
+        )
+    }
+
+    private func taskSequenceResultMessage(
+        _ result: TaskSequenceResult
+    ) -> String {
+        switch result {
+        case let .completed(outcomes):
+            return "Done. All \(outcomes.count) requests finished."
+        case let .halted(index, outcomes):
+            let reason: String
+            switch outcomes.last?.outcome {
+            case let .denied(message), let .failed(message):
+                reason = message
+            default:
+                reason = "It could not be completed."
+            }
+            return
+                "Stopped at request \(index + 1). \(reason) The remaining requests were not attempted."
+        }
+    }
+
+    private func taskSequenceStepFailureMessage(
+        _ error: Error,
+        index: Int,
+        total: Int,
+        requestedName: String
+    ) -> String {
+        let prefix = "Request \(index + 1) of \(total):"
+        switch error {
+        case InstalledApplicationResolutionError.notFound:
+            return "\(prefix) no installed app is named “\(requestedName)”."
+        case InstalledApplicationResolutionError.ambiguousExactName:
+            return
+                "\(prefix) several apps share the name “\(requestedName)”. Use Search this Mac to pick one."
+        case ApplicationProposalError.switchTargetNotRunning:
+            return
+                "\(prefix) “\(requestedName)” is not running, so it cannot be switched to. Say “open \(requestedName)” instead."
+        default:
+            return "\(prefix) it could not be planned safely."
         }
     }
 

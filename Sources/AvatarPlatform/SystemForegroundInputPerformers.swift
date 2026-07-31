@@ -262,24 +262,44 @@ public final class SystemKeyboardShortcutPerformer: KeyboardShortcutPerformer {
     ]
 }
 
-/// Brings the exact target application forward. Reuses the existing native
-/// workspace so activation behaves identically to native app launch/switch.
+/// Brings the exact target application forward, launching it first when it is
+/// not already running. Reuses the existing native workspace so behavior matches
+/// native app launch/switch.
 @MainActor
 public final class SystemForegroundActivationPerformer: ForegroundActivationPerformer {
     private let workspace: any NativeApplicationWorkspace
+    private let applicationURL: (String) -> URL?
 
     public init(
-        workspace: any NativeApplicationWorkspace = SystemNativeApplicationWorkspace()
+        workspace: any NativeApplicationWorkspace = SystemNativeApplicationWorkspace(),
+        applicationURL: @escaping (String) -> URL? = { bundleIdentifier in
+            NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: bundleIdentifier
+            )
+        }
     ) {
         self.workspace = workspace
+        self.applicationURL = applicationURL
     }
 
-    public func activate(bundleIdentifier: String) -> ForegroundInputResult {
-        switch workspace.activateRunningApplication(bundleIdentifier: bundleIdentifier) {
-        case .succeeded:
+    public func activate(bundleIdentifier: String) async -> ForegroundInputResult {
+        if case .succeeded = workspace.activateRunningApplication(
+            bundleIdentifier: bundleIdentifier
+        ) {
             return .performed
-        case let .failed(reason):
-            return .failed(reason)
+        }
+        guard let url = applicationURL(bundleIdentifier) else {
+            return .failed("Couldn't find that app on this Mac.")
+        }
+        return await withCheckedContinuation { continuation in
+            workspace.launchApplication(at: url) { result in
+                switch result {
+                case .succeeded:
+                    continuation.resume(returning: .performed)
+                case let .failed(reason):
+                    continuation.resume(returning: .failed(reason))
+                }
+            }
         }
     }
 }

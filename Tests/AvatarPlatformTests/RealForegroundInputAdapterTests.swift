@@ -307,7 +307,7 @@ final class FakeActivationPerformer: ForegroundActivationPerformer {
     var result: ForegroundInputResult = .performed
     private(set) var calls: [String] = []
 
-    func activate(bundleIdentifier: String) -> ForegroundInputResult {
+    func activate(bundleIdentifier: String) async -> ForegroundInputResult {
         calls.append(bundleIdentifier)
         return result
     }

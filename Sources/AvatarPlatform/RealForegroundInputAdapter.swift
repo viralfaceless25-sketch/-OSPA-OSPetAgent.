@@ -35,10 +35,11 @@ public protocol KeyboardShortcutPerformer: AnyObject {
     ) -> ForegroundInputResult
 }
 
-/// Brings/keeps the exact target application in front. No HID.
+/// Brings the exact target application to the front, launching it first if it
+/// is not running. No HID. Async because launching is inherently asynchronous.
 @MainActor
 public protocol ForegroundActivationPerformer: AnyObject {
-    func activate(bundleIdentifier: String) -> ForegroundInputResult
+    func activate(bundleIdentifier: String) async -> ForegroundInputResult
 }
 
 /// The first real `CapabilityAdapter`. Reuses the existing
@@ -116,7 +117,9 @@ public final class RealForegroundInputAdapter: CapabilityAdapter {
                     toBundleIdentifier: target
                 )
             case .activateTargetApplication, .launchOrActivateApplication:
-                result = activationPerformer.activate(bundleIdentifier: target)
+                result = await activationPerformer.activate(
+                    bundleIdentifier: target
+                )
             case .none:
                 return .failed("This step has nothing I can do.")
             }

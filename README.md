@@ -108,6 +108,30 @@ The Command-S example is explicitly illustrative, not a learned universal shortc
 Rendering the plan never runs it: `PreviewOnlyForegroundAdapter` has no execute
 method. Running it requires the separate confirmation below.
 
+## Ask for several things at once
+
+Type one request containing several: `open Safari and open Notes`, or
+`open Safari, open Notes and then switch to Music`. Clauses split on `and`,
+`then`, commas, and semicolons, up to five requests.
+
+1. Turn off **Observe only**.
+2. Type the request and select **Preview**.
+3. Review the numbered list — every step is shown before anything runs.
+4. Select **Confirm and run all N**.
+
+One confirmation authorizes that exact list. The chain is the consent unit, but
+each step still mints its own least-privilege, one-shot, 30-second grant and
+contract when it starts, so a step that never runs never held authority.
+Emergency stop and expiry are re-checked before every step, and the first failure
+stops the rest — the progress list shows exactly how far it got and why it
+stopped.
+
+Every clause must be a supported command or the whole request is refused rather
+than half-run. A request whose later clause is a goal rather than a command —
+`open Netflix and continue playing One Piece` — keeps the existing behavior: the
+first step is executable and the remainder is previewed as an explicitly
+deferred, non-executable goal.
+
 ## Try real execution
 
 Only this flow generates input events. It stays behind every existing gate.
