@@ -8,16 +8,16 @@ import Foundation
 /// injected because it lives in the app's SafetyState, not the OS.
 @MainActor
 public final class SystemForegroundEnvironmentProbe: ForegroundEnvironmentProbe {
-    private let frontmostBundleIdentifier: () -> String?
-    private let accessibilityTrusted: () -> Bool
-    private let isEmergencyStopped: () -> Bool
+    private let frontmostBundleIdentifier: @MainActor () -> String?
+    private let accessibilityTrusted: @MainActor () -> Bool
+    private let isEmergencyStopped: @MainActor () -> Bool
 
     public init(
-        isEmergencyStopped: @escaping () -> Bool,
-        frontmostBundleIdentifier: @escaping () -> String? = {
+        isEmergencyStopped: @MainActor @escaping () -> Bool,
+        frontmostBundleIdentifier: @MainActor @escaping () -> String? = {
             NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         },
-        accessibilityTrusted: @escaping () -> Bool = { AXIsProcessTrusted() }
+        accessibilityTrusted: @MainActor @escaping () -> Bool = { AXIsProcessTrusted() }
     ) {
         self.isEmergencyStopped = isEmergencyStopped
         self.frontmostBundleIdentifier = frontmostBundleIdentifier

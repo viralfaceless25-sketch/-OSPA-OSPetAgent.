@@ -21,6 +21,10 @@ final class AvatarModel: ObservableObject {
         "Accessibility permission has not been checked."
     @Published var computerUsePreview: ComputerUsePreview?
     @Published private(set) var previewAuditRecords: [PreviewAuditRecord] = []
+    @Published private(set) var computerUseAuditEvents: [AuditEvent] = []
+    @Published var isExecutingComputerUseAction = false
+    @Published var computerUseActionStatus =
+        "No visible foreground action is pending."
     @Published var accessibilityInspectionRequest: AccessibilityInspectionRequest?
     @Published var accessibilityUISnapshot: AccessibilityUISnapshot?
     @Published var accessibilityInteractionPreview: AccessibilityInteractionPreview?
@@ -71,6 +75,20 @@ final class AvatarModel: ObservableObject {
     private let nativeLocalItemExecutor = NativeLocalItemExecutor()
     private let searchRanker = LocalSearchRanker()
     private let searchScopePolicy = LocalSearchScopePolicy()
+    private let computerUseConsentLedger = ConsentUseLedger()
+    private lazy var computerUseAdapter = RealForegroundInputAdapter(
+        probe: SystemForegroundEnvironmentProbe(
+            isEmergencyStopped: { [weak self] in
+                self?.safety.emergencyStopped ?? true
+            }
+        ),
+        accessibilityPerformer: SystemAccessibilityActionPerformer(),
+        keyboardPerformer: SystemKeyboardShortcutPerformer(),
+        activationPerformer: SystemForegroundActivationPerformer(),
+        consentLedger: computerUseConsentLedger
+    )
+    private var pendingComputerUsePlan: ActionPlan?
+    private var pendingComputerUseProfile: CapabilityProfile?
     private var consumedConsentGrantIDs = Set<UUID>()
     private var consumedInspectionRequestIDs = Set<UUID>()
     private var indexedApplications: [ResolvedApplication] = []
@@ -336,7 +354,7 @@ final class AvatarModel: ObservableObject {
         safety.emergencyStopped = true
         safety.observeOnly = true
         previewedAction = nil
-        computerUsePreview = nil
+        clearPendingComputerUsePlan()
         clearAccessibilityInspection()
         pendingApplicationProposal = nil
         applicationProposalExpiresAt = nil
@@ -379,8 +397,9 @@ final class AvatarModel: ObservableObject {
         )
         researchRequest = nil
         researchAuthorization = nil
-        computerUsePreview = nil
+        clearPendingComputerUsePlan()
         clearAccessibilityInspection()
+        computerUseActionStatus = "No visible foreground action is pending."
         discoveryStatus =
             "Identified \(displayName) by bundle ID only. No app content was read."
     }
@@ -883,6 +902,97 @@ final class AvatarModel: ObservableObject {
         }
     }
 
+    /// True only when a real plan is pending and every gate currently allows it.
+    /// The preview itself stays non-executable; this drives the separate
+    /// confirmation affordance.
+    var computerUseExecutionReady: Bool {
+        guard let preview = computerUsePreview,
+            pendingComputerUsePlan != nil,
+            preview.readinessIssues.isEmpty,
+            !safety.observeOnly,
+            !safety.emergencyStopped,
+            !isExecutingComputerUseAction
+        else {
+            return false
+        }
+        return Date() < preview.expiresAt
+    }
+
+    func confirmComputerUseAction() {
+        guard
+            let plan = pendingComputerUsePlan,
+            let profile = pendingComputerUseProfile
+        else {
+            computerUseActionStatus = "Create a plan before confirming."
+            return
+        }
+
+        let now = Date()
+        let permission = PermissionScope.accessibility(
+            targetBundleIdentifier: plan.app.bundleIdentifier
+        )
+        let consent = ConsentGrant(
+            planID: plan.id,
+            scopes: [permission],
+            approvedAt: now,
+            expiresAt: now.addingTimeInterval(30),
+            oneShot: true
+        )
+
+        do {
+            let validated = try PlanValidator().validate(
+                plan: plan,
+                profile: profile,
+                consent: consent,
+                safety: safety,
+                userConfirmedPreview: true,
+                now: now
+            )
+            let contract = ExecutionContract(
+                validatedPlan: validated,
+                issuedAt: now,
+                expiresAt: consent.expiresAt
+            )
+            computerUseAuditEvents.append(
+                AuditEvent(
+                    contractID: contract.id,
+                    planID: plan.id,
+                    timestamp: now,
+                    outcome: .started
+                )
+            )
+            clearPendingComputerUsePlan()
+            isExecutingComputerUseAction = true
+            computerUseActionStatus =
+                "Performing the visible steps in \(plan.app.displayName). Keep it in front."
+
+            Task { [weak self] in
+                guard let self else { return }
+                let outcome = await self.computerUseAdapter.execute(contract)
+                self.isExecutingComputerUseAction = false
+                self.computerUseAuditEvents.append(
+                    AuditEvent(
+                        contractID: contract.id,
+                        planID: plan.id,
+                        timestamp: Date(),
+                        outcome: self.redactedComputerUseOutcome(outcome)
+                    )
+                )
+                self.computerUseActionStatus =
+                    self.computerUseOutcomeMessage(outcome)
+            }
+        } catch PlanValidationError.observeOnly {
+            computerUseActionStatus =
+                "Observe-only mode blocks execution. Turn it off, then confirm again."
+        } catch PlanValidationError.emergencyStopped {
+            computerUseActionStatus = "Emergency stop blocks execution."
+        } catch {
+            clearPendingComputerUsePlan()
+            computerUseActionStatus =
+                "The plan no longer validates. Create it again."
+        }
+    }
+
     func buildPreviewOnlyComputerUsePlan() {
         guard let app = discoveredApp else {
             discoveryStatus = "Identify an app before building a preview."
@@ -1181,13 +1291,19 @@ final class AvatarModel: ObservableObject {
                 )
             )
             computerUsePreview = preview
+            pendingComputerUsePlan = plan
+            pendingComputerUseProfile = profile
             previewAuditRecords.append(
                 PreviewAuditRecord(preview: preview, renderedAt: now)
             )
             discoveryStatus =
-                "Preview contract created and audited. It expires in 60 seconds and cannot execute."
+                "Preview contract created and audited. It expires in 60 seconds."
+            computerUseActionStatus =
+                preview.readinessIssues.isEmpty
+                ? "Ready for one explicit confirmation. Nothing runs until you confirm."
+                : "Blocked until the listed readiness issues are cleared."
         } catch {
-            computerUsePreview = nil
+            clearPendingComputerUsePlan()
             discoveryStatus = "Preview contract rejected: \(error)"
         }
     }
@@ -1261,6 +1377,48 @@ final class AvatarModel: ObservableObject {
             "Document limit must be between 1 and 10."
         default:
             "Research scope could not be prepared."
+        }
+    }
+
+    private func clearPendingComputerUsePlan() {
+        pendingComputerUsePlan = nil
+        pendingComputerUseProfile = nil
+        computerUsePreview = nil
+    }
+
+    /// Audit keeps outcome shape only. Reasons can name on-screen controls, so
+    /// they stay in the user-facing status and never reach the audit record.
+    private func redactedComputerUseOutcome(
+        _ outcome: ExecutionOutcome
+    ) -> ExecutionOutcome {
+        switch outcome {
+        case .started:
+            .started
+        case .succeeded:
+            .succeeded
+        case .cancelled:
+            .cancelled
+        case .denied:
+            .denied("Visible foreground action denied.")
+        case .failed:
+            .failed("Visible foreground action failed.")
+        }
+    }
+
+    private func computerUseOutcomeMessage(
+        _ outcome: ExecutionOutcome
+    ) -> String {
+        switch outcome {
+        case .succeeded:
+            "Done. The visible steps completed."
+        case let .denied(reason):
+            "Stopped before acting: \(reason)"
+        case let .failed(reason):
+            "Couldn't finish: \(reason)"
+        case .cancelled:
+            "Action cancelled."
+        case .started:
+            "Action started."
         }
     }
 

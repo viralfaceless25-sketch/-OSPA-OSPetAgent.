@@ -804,7 +804,7 @@ struct AvatarView: View {
         _ preview: ComputerUsePreview
     ) -> some View {
         VStack(alignment: .leading, spacing: 7) {
-            Label("Non-executable preview", systemImage: "eye")
+            Label("Plan preview — nothing runs until you confirm", systemImage: "eye")
                 .font(.caption.weight(.semibold))
 
             Text(
@@ -848,8 +848,29 @@ struct AvatarView: View {
                 }
             }
 
-            Text("Execution: disabled by preview-only adapter.")
+            Divider()
+
+            Text(model.computerUseActionStatus)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("Confirm and run these steps") {
+                model.confirmComputerUseAction()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!model.computerUseExecutionReady)
+
+            if model.isExecutingComputerUseAction {
+                Text("Running… keep the target app in front.")
+                    .foregroundStyle(.orange)
+            }
+
+            Text(
+                "Redacted action audit records: \(model.computerUseAuditEvents.count)"
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
         .font(.caption)
         .padding(10)
