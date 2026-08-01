@@ -105,11 +105,14 @@ never reach the model.
 
 ## 4. Exact current state
 
-Branch `feat/sub-b-local-brain`, HEAD `31d8b37`, pushed and working tree clean.
-**177 tests green** (baseline before Sub-B was 106).
+Branch `feat/sub-b-local-brain`, implementation HEAD `3d5f9aa`, pushed. Draft PR
+[#1](https://github.com/viralfaceless25-sketch/-OSPA-OSPetAgent./pull/1) is open
+against `main`. **194 tests green** (baseline before Sub-B was 106).
 
-⚠️ **Only pushed through `260ea1a`.** Commits `b373ea8`, `10c7d76`, `5627a2d`,
-`666f05b`, `863496a` are LOCAL ONLY. Push early.
+The post-review proposal/reason lifecycle finding is fixed structurally: one
+model-private immutable binding ties the validated reason to its exact pending plan
+ID, and terminal/replacement paths clear both together. No implementation commits
+remain local-only.
 
 | Task | File(s) | State |
 | --- | --- | --- |
@@ -126,11 +129,14 @@ Branch `feat/sub-b-local-brain`, HEAD `31d8b37`, pushed and working tree clean.
 
 Sub-B slice 1 is complete. Tasks 1-6 and every scoped re-review passed. The final
 whole-branch review found no remaining Critical or Important issue. A clean rebuild
-with no prior `.build` state passed 190 tests and built/signed the release app.
+with no prior `.build` state passed 190 tests and built/signed the release app; the
+subsequent proposal/reason binding regression fix passed the expanded 194-test suite.
 
-Branch `feat/sub-b-local-brain` is pushed through `31d8b37`. There is no remaining
-implementation queue in this slice. Stop and ask the user to choose whether to merge
-to `main`, open a PR, or keep the branch as-is. Never merge or open a PR unprompted.
+Branch `feat/sub-b-local-brain` is pushed through `3d5f9aa`. Draft PR
+[#1](https://github.com/viralfaceless25-sketch/-OSPA-OSPetAgent./pull/1) is open
+against `main` and includes the deferred minor findings from the review ledger. There
+is no remaining implementation queue in this slice. Do not merge without the user's
+explicit decision.
 
 Do **not** start Sub-B slice 2 (router/evaluator/cloud escalation) or the web tiers.
 Those require a separate spec and explicit user approval.
