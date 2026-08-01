@@ -5,6 +5,11 @@ import Foundation
 
 @MainActor
 final class AvatarModel: ObservableObject {
+    private struct BrainProposalBinding {
+        let planID: UUID
+        let reason: String
+    }
+
     @Published var isExpanded = false
     @Published var command = ""
     @Published var previewedAction: AvatarAction?
@@ -38,7 +43,9 @@ final class AvatarModel: ObservableObject {
     @Published private(set) var accessibilityInspectionAuditRecords:
         [AccessibilityInspectionAuditRecord] = []
     @Published var accessibilityInspectionRequestConsumed = false
-    @Published var pendingApplicationProposal: ApplicationActionProposal?
+    @Published var pendingApplicationProposal: ApplicationActionProposal? {
+        didSet { clearBrainBindingIfDetached() }
+    }
     @Published var applicationProposalExpiresAt: Date?
     @Published var applicationActionStatus =
         "Executable app commands: “open Safari” or “switch to Notes”. Follow-up goals preview only."
@@ -62,7 +69,7 @@ final class AvatarModel: ObservableObject {
     @Published var isBrainEnabled = false
     @Published var isBrainThinking = false
     @Published var brainStatus = "Natural language is off. Type exact commands."
-    @Published var brainReason: String?
+    var brainReason: String? { brainProposalBinding?.reason }
 
     var onExpansionChanged: ((Bool) -> Void)?
     var onHide: (() -> Void)?
@@ -111,6 +118,7 @@ final class AvatarModel: ObservableObject {
     private var consumedInspectionRequestIDs = Set<UUID>()
     private var indexedApplications: [ResolvedApplication] = []
     private var personalSearchItems: [LocalSearchItem] = []
+    private var brainProposalBinding: BrainProposalBinding?
     private var brainTask: Task<Void, Never>?
     private var brainIdleShutdownTask: Task<Void, Never>?
 
@@ -417,7 +425,6 @@ final class AvatarModel: ObservableObject {
             brainStatus = "Natural language is on. Type what you want in ordinary words."
         } else {
             cancelBrainProposal()
-            brainReason = nil
             brainStatus = "Natural language is off. Type exact commands."
             brainIdleShutdownTask?.cancel()
             brainIdleShutdownTask = nil
@@ -432,7 +439,6 @@ final class AvatarModel: ObservableObject {
         cancelBrainProposal()
         brainIdleShutdownTask?.cancel()
         brainIdleShutdownTask = nil
-        brainReason = nil
         brainStatus = "Emergency stop active. Thinking cancelled."
         Task { await brainServerController.shutdown() }
         clearPendingComputerUsePlan()
@@ -1319,7 +1325,7 @@ final class AvatarModel: ObservableObject {
         brainTask?.cancel()
         brainIdleShutdownTask?.cancel()
         brainIdleShutdownTask = nil
-        brainReason = nil
+        clearBrainOriginatedProposal()
         isBrainThinking = true
         brainStatus = "Thinking…"
 
@@ -1374,13 +1380,17 @@ final class AvatarModel: ObservableObject {
 
         switch outcome {
         case let .success(proposal):
-            brainReason = proposal.reason
-            brainStatus = proposal.reason
             if let command = proposal.parsedApplicationCommand {
                 previewApplicationCommand(command)
+                if let planID = pendingApplicationProposal?.plan.id {
+                    bindBrainReason(proposal.reason, to: planID)
+                } else {
+                    brainStatus = proposal.reason
+                }
+            } else {
+                brainStatus = proposal.reason
             }
         case let .failure(error):
-            brainReason = nil
             pendingApplicationProposal = nil
             applicationProposalExpiresAt = nil
             brainStatus = Self.brainMessage(for: error)
@@ -1391,9 +1401,46 @@ final class AvatarModel: ObservableObject {
         brainTask?.cancel()
         brainTask = nil
         isBrainThinking = false
-        brainReason = nil
+        clearBrainOriginatedProposal()
         if isBrainEnabled, !safety.emergencyStopped {
             brainStatus = "Natural language is on. Type what you want in ordinary words."
+        }
+    }
+
+    private func bindBrainReason(_ reason: String, to planID: UUID) {
+        guard pendingApplicationProposal?.plan.id == planID else { return }
+        brainProposalBinding = BrainProposalBinding(
+            planID: planID,
+            reason: reason
+        )
+        brainStatus = reason
+    }
+
+    private func clearBrainOriginatedProposal() {
+        guard let binding = brainProposalBinding else { return }
+        if pendingApplicationProposal?.plan.id == binding.planID {
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+        }
+        clearBrainProposalBinding()
+    }
+
+    private func clearBrainBindingIfDetached() {
+        guard let binding = brainProposalBinding,
+            pendingApplicationProposal?.plan.id != binding.planID
+        else {
+            return
+        }
+        clearBrainProposalBinding()
+    }
+
+    private func clearBrainProposalBinding() {
+        guard let binding = brainProposalBinding else { return }
+        brainProposalBinding = nil
+        if brainStatus == binding.reason {
+            brainStatus = isBrainEnabled
+                ? "Natural language is on. Type what you want in ordinary words."
+                : "Natural language is off. Type exact commands."
         }
     }
 
@@ -1609,6 +1656,7 @@ final class AvatarModel: ObservableObject {
             now: now
         )
 
+        clearBrainProposalBinding()
         pendingApplicationProposal = proposal
         applicationProposalExpiresAt = now.addingTimeInterval(60)
     }

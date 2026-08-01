@@ -90,7 +90,7 @@ private func waitUntil(
 ) async {
     for _ in 0..<200 {
         if condition() { return }
-        await Task.yield()
+        try? await Task.sleep(nanoseconds: 5_000_000)
     }
     Issue.record("Timed out waiting for AvatarModel state")
 }
@@ -103,6 +103,69 @@ struct AvatarModelBrainTests {
             displayName: "Test App", openCount: 10, lastUsedDaysAgo: 0
         )
     ]
+
+    private func exactInstalledApplications(
+        count: Int
+    ) throws -> [ResolvedApplication] {
+        let resolver = InstalledApplicationResolver()
+        var applications: [ResolvedApplication] = []
+
+        for candidate in resolver.currentIndex().sorted(by: {
+            $0.identity.displayName < $1.identity.displayName
+        }) {
+            guard
+                let resolved = try? resolver.resolveExact(
+                    named: candidate.identity.displayName
+                ),
+                resolved.applicationURL.standardizedFileURL
+                    == candidate.applicationURL.standardizedFileURL,
+                !applications.contains(where: {
+                    $0.identity == candidate.identity
+                })
+            else {
+                continue
+            }
+            applications.append(candidate)
+            if applications.count == count { return applications }
+        }
+
+        Issue.record("Need \(count) uniquely resolvable installed applications")
+        return []
+    }
+
+    private func brainApplicationModel(
+        target: ResolvedApplication,
+        reason: String
+    ) -> AvatarModel {
+        let usage = InstalledApplicationUsage(
+            displayName: target.identity.displayName,
+            openCount: 10,
+            lastUsedDaysAgo: 0
+        )
+        let service = RecordingBrainService(
+            .proposal(
+                RawBrainToolCall(
+                    toolName: "open_application",
+                    argumentsJSON:
+                        #"{"name":"\#(target.identity.displayName)","reason":"\#(reason)"}"#
+                )
+            )
+        )
+        return AvatarModel(
+            usageSource: FixedUsageSource(inventory: [usage]),
+            brainService: service,
+            brainServerController: readyServerController()
+        )
+    }
+
+    private func previewBrainApplication(
+        with model: AvatarModel
+    ) async {
+        model.setBrainEnabled(true)
+        model.command = "choose the best application for this unusual request"
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+    }
 
     @Test("Plain language reaches the brain only after deterministic parsers decline")
     func usesBrainFallback() async {
@@ -126,7 +189,8 @@ struct AvatarModelBrainTests {
         await waitUntil { !model.isBrainThinking }
 
         #expect(await service.requestCount() == 1)
-        #expect(model.brainReason == "No installed app can do that.")
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus == "No installed app can do that.")
         #expect(model.pendingApplicationProposal == nil)
     }
 
@@ -141,8 +205,6 @@ struct AvatarModelBrainTests {
             brainServerController: readyServerController()
         )
         model.isBrainEnabled = true
-        model.brainReason = "Stale reason"
-        model.brainStatus = "Stale reason"
         model.command = "open Safari"
 
         model.previewCommand()
@@ -230,5 +292,100 @@ struct AvatarModelBrainTests {
             model.brainStatus
                 == "Natural language is on. Type what you want in ordinary words."
         )
+    }
+
+    @Test("Selecting a different app cannot retain a brain proposal's reason")
+    func searchReplacementClearsBrainReason() async throws {
+        let applications = try exactInstalledApplications(count: 2)
+        let brainTarget = try #require(applications.first)
+        let searchTarget = try #require(applications.dropFirst().first)
+        let reason = "This reason belongs only to the first application."
+        let model = brainApplicationModel(target: brainTarget, reason: reason)
+
+        await previewBrainApplication(with: model)
+        #expect(
+            model.pendingApplicationProposal?.application.identity
+                == brainTarget.identity
+        )
+        #expect(model.brainReason == reason)
+
+        model.openSearch()
+        model.approveSearchScopes()
+        await waitUntil { model.searchStatus.hasPrefix("Ready.") }
+        model.updateSearchQuery(searchTarget.identity.displayName)
+        await waitUntil {
+            model.searchCandidates.contains {
+                $0.item.url.standardizedFileURL
+                    == searchTarget.applicationURL.standardizedFileURL
+            }
+        }
+        let replacement = try #require(
+            model.searchCandidates.first {
+                $0.item.url.standardizedFileURL
+                    == searchTarget.applicationURL.standardizedFileURL
+            }
+        )
+        model.selectSearchCandidate(replacement)
+
+        #expect(
+            model.pendingApplicationProposal?.application.identity
+                == searchTarget.identity
+        )
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus != reason)
+    }
+
+    @Test("Disabling the brain clears its confirmable proposal and reason together")
+    func disablingBrainClearsPublishedProposal() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let reason = "This reason is bound to the brain proposal."
+        let model = brainApplicationModel(target: target, reason: reason)
+
+        await previewBrainApplication(with: model)
+        #expect(model.pendingApplicationProposal != nil)
+        #expect(model.brainReason == reason)
+
+        model.setBrainEnabled(false)
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.applicationProposalExpiresAt == nil)
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus == "Natural language is off. Type exact commands.")
+    }
+
+    @Test("An expired brain proposal loses its reason when it stops being confirmable")
+    func expiryClearsBrainReason() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let reason = "This reason expires with its proposal."
+        let model = brainApplicationModel(target: target, reason: reason)
+
+        await previewBrainApplication(with: model)
+        #expect(model.pendingApplicationProposal != nil)
+        #expect(model.brainReason == reason)
+
+        model.applicationProposalExpiresAt = .distantPast
+        model.confirmApplicationAction()
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus != reason)
+    }
+
+    @Test("Emergency stop clears a completed brain proposal and its reason")
+    func emergencyStopClearsPublishedProposal() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let reason = "This reason ends with Emergency Stop."
+        let model = brainApplicationModel(target: target, reason: reason)
+
+        await previewBrainApplication(with: model)
+        #expect(model.pendingApplicationProposal != nil)
+        #expect(model.brainReason == reason)
+
+        model.emergencyStop()
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.applicationProposalExpiresAt == nil)
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus == "Emergency stop active. Thinking cancelled.")
     }
 }
