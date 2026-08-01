@@ -80,6 +80,84 @@ private actor ControlledBrainService: LocalBrainService {
     }
 }
 
+private actor RecordingIntentRouter: LocalBrainIntentRouting {
+    enum Behavior: Sendable {
+        case lane(LocalBrainIntentLane)
+        case failure(LocalBrainError)
+    }
+
+    private let behavior: Behavior
+    private var requests: [String] = []
+
+    init(_ behavior: Behavior) {
+        self.behavior = behavior
+    }
+
+    func route(request: String) async throws -> LocalBrainIntentLane {
+        requests.append(request)
+        switch behavior {
+        case let .lane(lane):
+            return lane
+        case let .failure(error):
+            throw error
+        }
+    }
+
+    func requestCount() -> Int {
+        requests.count
+    }
+}
+
+private actor ControlledIntentRouter: LocalBrainIntentRouting {
+    private var continuation: CheckedContinuation<LocalBrainIntentLane, Never>?
+    private var started = false
+
+    func route(request: String) async throws -> LocalBrainIntentLane {
+        started = true
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func hasStarted() -> Bool {
+        started
+    }
+
+    func finishAfterCancellation(returning lane: LocalBrainIntentLane) {
+        continuation?.resume(returning: lane)
+        continuation = nil
+    }
+}
+
+private struct FixedChatService: LocalBrainChatService {
+    let response: String
+
+    func answer(request: String) async throws -> String {
+        response
+    }
+}
+
+private actor ControlledChatService: LocalBrainChatService {
+    private var continuation: CheckedContinuation<String, Never>?
+    private var started = false
+
+    func answer(request: String) async throws -> String {
+        started = true
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func hasStarted() -> Bool {
+        started
+    }
+
+    func finishAfterCancellation(returning response: String) {
+        continuation?.resume(returning: response)
+        continuation = nil
+    }
+}
+
 private func readyServerController() -> LocalBrainServerController {
     LocalBrainServerController(
         launch: {},
@@ -161,6 +239,7 @@ struct AvatarModelBrainTests {
         return AvatarModel(
             usageSource: FixedUsageSource(inventory: [usage]),
             brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
             brainServerController: readyServerController()
         )
     }
@@ -198,6 +277,7 @@ struct AvatarModelBrainTests {
                 }
             ),
             brainService: RecordingBrainService(.proposals(calls)),
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
             brainServerController: readyServerController()
         )
     }
@@ -224,6 +304,7 @@ struct AvatarModelBrainTests {
         let model = AvatarModel(
             usageSource: FixedUsageSource(inventory: inventory),
             brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
             brainServerController: readyServerController()
         )
         model.isBrainEnabled = true
@@ -236,6 +317,147 @@ struct AvatarModelBrainTests {
         #expect(model.brainReason == nil)
         #expect(model.brainStatus == "No installed app can do that.")
         #expect(model.pendingApplicationProposal == nil)
+    }
+
+    @Test("A weather request is refused honestly without an app proposal")
+    func weatherRoutesToUnsupported() async {
+        let service = RecordingBrainService(.failure(.unavailable))
+        let router = RecordingIntentRouter(.lane(.unsupported))
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: router,
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "what's the weather in Tokyo"
+
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        #expect(await router.requestCount() == 1)
+        #expect(await service.requestCount() == 0)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(
+            model.brainStatus
+                == "I can’t browse the web or use current online information yet. I can open or switch Mac apps, or chat about things that don’t need current information."
+        )
+    }
+
+    @Test("The chat lane publishes text but no action")
+    func chatLanePublishesNoAction() async {
+        let service = RecordingBrainService(.failure(.unavailable))
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.chat)),
+            brainChatService: FixedChatService(
+                response: "Photosynthesis turns light into stored chemical energy."
+            ),
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "explain photosynthesis"
+
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        #expect(await service.requestCount() == 0)
+        #expect(
+            model.brainStatus
+                == "Photosynthesis turns light into stored chemical energy."
+        )
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.previewedAction == nil)
+    }
+
+    @Test("The native app lane still refuses an invalid model tool")
+    func nativeLaneStillUsesProposalValidator() async {
+        let service = RecordingBrainService(
+            .proposal(
+                RawBrainToolCall(
+                    toolName: "run_shell",
+                    argumentsJSON: #"{"reason":"Must be refused."}"#
+                )
+            )
+        )
+        let router = RecordingIntentRouter(.lane(.nativeApp))
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: router,
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "run something for me"
+
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        #expect(await router.requestCount() == 1)
+        #expect(await service.requestCount() == 1)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.brainStatus.contains("not allowed"))
+    }
+
+    @Test("Disabling natural language ignores a late router result")
+    func disablingBrainCancelsIntentRouting() async {
+        let service = RecordingBrainService(.failure(.unavailable))
+        let router = ControlledIntentRouter()
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: router,
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "choose an app"
+
+        model.previewCommand()
+        for _ in 0..<200 {
+            if await router.hasStarted() { break }
+            await Task.yield()
+        }
+        #expect(await router.hasStarted())
+        model.setBrainEnabled(false)
+        await router.finishAfterCancellation(returning: .nativeApp)
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(await service.requestCount() == 0)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.brainStatus == "Natural language is off. Type exact commands.")
+    }
+
+    @Test("Emergency Stop ignores a late chat answer")
+    func emergencyStopCancelsChat() async {
+        let chat = ControlledChatService()
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: RecordingBrainService(.failure(.unavailable)),
+            brainIntentRouter: RecordingIntentRouter(.lane(.chat)),
+            brainChatService: chat,
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "tell me something"
+
+        model.previewCommand()
+        for _ in 0..<200 {
+            if await chat.hasStarted() { break }
+            await Task.yield()
+        }
+        #expect(await chat.hasStarted())
+        model.emergencyStop()
+        await chat.finishAfterCancellation(returning: "Late text must be ignored.")
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.brainStatus == "Emergency stop active. Thinking cancelled.")
     }
 
     @Test("A brain chain previews every validated step in model order")
@@ -436,6 +658,7 @@ struct AvatarModelBrainTests {
                 }
             ),
             brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
             brainServerController: readyServerController()
         )
         model.setBrainEnabled(true)
@@ -488,9 +711,11 @@ struct AvatarModelBrainTests {
         let service = RecordingBrainService(
             .failure(.unavailable)
         )
+        let router = RecordingIntentRouter(.lane(.nativeApp))
         let model = AvatarModel(
             usageSource: FixedUsageSource(inventory: inventory),
             brainService: service,
+            brainIntentRouter: router,
             brainServerController: readyServerController()
         )
         model.isBrainEnabled = true
@@ -500,6 +725,7 @@ struct AvatarModelBrainTests {
         await Task.yield()
 
         #expect(await service.requestCount() == 0)
+        #expect(await router.requestCount() == 0)
         #expect(!model.isBrainThinking)
         #expect(model.brainReason == nil)
         #expect(
@@ -511,9 +737,11 @@ struct AvatarModelBrainTests {
     @Test("Deterministic foreground composition stays ahead of the brain")
     func foregroundComposerSkipsBrain() async {
         let service = RecordingBrainService(.failure(.unavailable))
+        let router = RecordingIntentRouter(.lane(.nativeApp))
         let model = AvatarModel(
             usageSource: FixedUsageSource(inventory: inventory),
             brainService: service,
+            brainIntentRouter: router,
             brainServerController: readyServerController(),
             frontmostBundleIdentifier: { "com.ospa.test.editor" }
         )
@@ -528,6 +756,7 @@ struct AvatarModelBrainTests {
         await Task.yield()
 
         #expect(await service.requestCount() == 0)
+        #expect(await router.requestCount() == 0)
         #expect(model.computerUsePreview != nil)
         #expect(!model.isBrainThinking)
     }
@@ -538,6 +767,7 @@ struct AvatarModelBrainTests {
         let model = AvatarModel(
             usageSource: FixedUsageSource(inventory: inventory),
             brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
             brainServerController: readyServerController()
         )
         model.isBrainEnabled = true
@@ -556,6 +786,7 @@ struct AvatarModelBrainTests {
         let model = AvatarModel(
             usageSource: FixedUsageSource(inventory: inventory),
             brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
             brainServerController: readyServerController()
         )
         model.isBrainEnabled = true
