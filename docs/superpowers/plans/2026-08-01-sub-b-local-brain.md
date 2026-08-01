@@ -121,11 +121,16 @@ struct BrainPromptBuilderTests {
         #expect(prompt.contains("Notes (opened 41 times, last used 1 day ago)"))
     }
 
-    @Test("Prompt carries no clock value that would invalidate the cache")
-    func containsNoTimestamp() {
+    @Test("Prompt carries no date or clock value that would invalidate the cache")
+    func containsNoTimestamp() throws {
         let prompt = builder.systemPrompt(for: sample())
-        #expect(!prompt.contains("20"))  // no year, no ISO date
-        #expect(!prompt.contains(":"))   // no clock time
+        // A literal date (2026-08-01) or clock time (13:45) in the prefix would
+        // change between requests and defeat prompt caching. App names may
+        // legitimately contain digits, so match the patterns, not bare digits.
+        let isoDate = try Regex(#"\d{4}-\d{2}-\d{2}"#)
+        let clockTime = try Regex(#"\d{1,2}:\d{2}"#)
+        #expect(prompt.firstMatch(of: isoDate) == nil)
+        #expect(prompt.firstMatch(of: clockTime) == nil)
     }
 
     @Test("Oversized inventories are capped, keeping the most-used apps")
@@ -1321,6 +1326,33 @@ private final class Recorder: @unchecked Sendable {
     var now = Date(timeIntervalSince1970: 1_000_000)
 }
 
+/// Controller whose server does NOT answer until it is launched. Use this for
+/// anything about launching, idle shutdown, or termination — the controller only
+/// terminates a server it started itself.
+private func makeLaunchingController(
+    _ recorder: Recorder,
+    startupTimeout: TimeInterval = 5,
+    idleShutdownInterval: TimeInterval = 300
+) -> LocalBrainServerController {
+    LocalBrainServerController(
+        launch: {
+            recorder.launches += 1
+            if let error = recorder.launchError { throw error }
+            recorder.healthy = true
+        },
+        terminate: {
+            recorder.terminations += 1
+            recorder.healthy = false
+        },
+        isHealthy: { recorder.healthy },
+        now: { recorder.now },
+        startupTimeout: startupTimeout,
+        idleShutdownInterval: idleShutdownInterval
+    )
+}
+
+/// Controller whose server is already answering before it is asked. Use this for
+/// adoption behavior.
 private func makeController(
     _ recorder: Recorder,
     startupTimeout: TimeInterval = 5,
@@ -1341,24 +1373,36 @@ private func makeController(
 
 @Suite("Local brain server controller")
 struct LocalBrainServerControllerTests {
-    @Test("A healthy server is reported ready and is launched exactly once")
+    @Test("A stopped server is launched once and then reused")
     func startsOnce() async {
         let recorder = Recorder()
-        recorder.healthy = true
-        let controller = makeController(recorder)
+        let controller = makeLaunchingController(recorder)
 
         #expect(await controller.ensureReady() == .ready)
         #expect(await controller.ensureReady() == .ready)
         #expect(recorder.launches == 1)
     }
 
-    @Test("An already-healthy server is adopted without launching a second one")
+    @Test("A server already answering is adopted, never launched a second time")
     func adoptsRunningServer() async {
         let recorder = Recorder()
         recorder.healthy = true
         let controller = makeController(recorder)
+
+        #expect(await controller.ensureReady() == .ready)
+        #expect(recorder.launches == 0)
+        #expect(recorder.terminations == 0)
+    }
+
+    @Test("A server this controller did not start is never terminated")
+    func leavesAdoptedServerRunning() async {
+        let recorder = Recorder()
+        recorder.healthy = true
+        let controller = makeController(recorder)
+
         _ = await controller.ensureReady()
-        #expect(recorder.launches == 0 || recorder.launches == 1)
+        await controller.shutdown()
+
         #expect(recorder.terminations == 0)
     }
 
@@ -1367,7 +1411,7 @@ struct LocalBrainServerControllerTests {
         struct Boom: Error {}
         let recorder = Recorder()
         recorder.launchError = Boom()
-        let controller = makeController(recorder)
+        let controller = makeLaunchingController(recorder)
 
         let state = await controller.ensureReady()
         guard case .failed = state else {
@@ -1379,8 +1423,15 @@ struct LocalBrainServerControllerTests {
     @Test("A server that never becomes healthy times out instead of hanging")
     func timesOutWhenNeverHealthy() async {
         let recorder = Recorder()
-        recorder.healthy = false
-        let controller = makeController(recorder, startupTimeout: 0)
+        // Launch succeeds but the server never answers.
+        let controller = LocalBrainServerController(
+            launch: { recorder.launches += 1 },
+            terminate: { recorder.terminations += 1 },
+            isHealthy: { false },
+            now: { recorder.now },
+            startupTimeout: 0,
+            idleShutdownInterval: 300
+        )
 
         let state = await controller.ensureReady()
         guard case .failed = state else {
@@ -1392,8 +1443,7 @@ struct LocalBrainServerControllerTests {
     @Test("An idle server is shut down and its memory returned")
     func shutsDownWhenIdle() async {
         let recorder = Recorder()
-        recorder.healthy = true
-        let controller = makeController(recorder, idleShutdownInterval: 60)
+        let controller = makeLaunchingController(recorder, idleShutdownInterval: 60)
 
         _ = await controller.ensureReady()
         await controller.noteRequestFinished()
@@ -1408,8 +1458,7 @@ struct LocalBrainServerControllerTests {
     @Test("A server still inside its idle window is left running")
     func keepsRecentlyUsedServer() async {
         let recorder = Recorder()
-        recorder.healthy = true
-        let controller = makeController(recorder, idleShutdownInterval: 600)
+        let controller = makeLaunchingController(recorder, idleShutdownInterval: 600)
 
         _ = await controller.ensureReady()
         await controller.noteRequestFinished()
@@ -1418,13 +1467,13 @@ struct LocalBrainServerControllerTests {
         await controller.shutdownIfIdle()
 
         #expect(recorder.terminations == 0)
+        #expect(await controller.state == .ready)
     }
 
-    @Test("Shutdown is idempotent and never terminates a stopped server twice")
+    @Test("Shutdown is idempotent and never terminates a server twice")
     func shutdownIsIdempotent() async {
         let recorder = Recorder()
-        recorder.healthy = true
-        let controller = makeController(recorder)
+        let controller = makeLaunchingController(recorder)
 
         _ = await controller.ensureReady()
         await controller.shutdown()
@@ -1436,7 +1485,7 @@ struct LocalBrainServerControllerTests {
     @Test("A server that was never started is not terminated")
     func neverTerminatesUnstartedServer() async {
         let recorder = Recorder()
-        let controller = makeController(recorder)
+        let controller = makeLaunchingController(recorder)
         await controller.shutdown()
         #expect(recorder.terminations == 0)
     }
