@@ -105,7 +105,7 @@ never reach the model.
 
 ## 4. Exact current state
 
-Branch `feat/sub-b-local-brain`, HEAD `863496a`, working tree clean.
+Branch `feat/sub-b-local-brain`, HEAD `31d8b37`, pushed and working tree clean.
 **177 tests green** (baseline before Sub-B was 106).
 
 ⚠️ **Only pushed through `260ea1a`.** Commits `b373ea8`, `10c7d76`, `5627a2d`,
@@ -116,72 +116,24 @@ Branch `feat/sub-b-local-brain`, HEAD `863496a`, working tree clean.
 | 1 prompt builder | `Sources/AvatarCore/BrainInventory.swift` | done, review clean |
 | 2 validator | `Sources/AvatarCore/BrainProposal.swift` | done, re-review PASS |
 | 3 MLX client | `Sources/AvatarPlatform/LocalBrainService.swift` | done, re-review PASS |
-| 4 usage source | `Sources/AvatarPlatform/ApplicationUsageSource.swift` | fixed, **re-review not yet run** |
-| 5 server lifecycle | `Sources/AvatarPlatform/LocalBrainServerController.swift` | **2 open findings, fix round 2 needed** |
-| 6 wiring + README | `Sources/AvatarCompanion/AvatarModel.swift`, `README.md` | **not started** |
+| 4 usage source | `Sources/AvatarPlatform/ApplicationUsageSource.swift` | done, re-review PASS |
+| 5 server lifecycle | `Sources/AvatarPlatform/LocalBrainServerController.swift` | done, re-review PASS |
+| 6 wiring + README | `Sources/AvatarCompanion/AvatarModel.swift`, `README.md` | done, re-review PASS |
 
 ---
 
-## 5. YOUR WORK QUEUE, in order
+## 5. COMPLETION STATE AND NEXT DECISION
 
-### 5a. Push first
-```sh
-cd /Volumes/ai-hub/OSPA && git push
-```
+Sub-B slice 1 is complete. Tasks 1-6 and every scoped re-review passed. The final
+whole-branch review found no remaining Critical or Important issue. A clean rebuild
+with no prior `.build` state passed 190 tests and built/signed the release app.
 
-### 5b. Task 5 fix round 2 — two open findings
+Branch `feat/sub-b-local-brain` is pushed through `31d8b37`. There is no remaining
+implementation queue in this slice. Stop and ask the user to choose whether to merge
+to `main`, open a PR, or keep the branch as-is. Never merge or open a PR unprompted.
 
-Both are in `Sources/AvatarPlatform/LocalBrainServerController.swift`.
-
-**Finding A (Important) — `outstandingRequests` is never reset.**
-The last fix added an `outstandingRequests` counter so `shutdownIfIdle()` won't kill a
-server mid-request. But neither `shutdown()` nor the terminate-before-relaunch branch
-resets it, unlike `didLaunch` and `lastRequestFinishedAt`, which both do. So: a request
-starts (counter → 1), the server crashes or is force-relaunched, and the counter is
-stuck at 1 against a brand-new instance. Idle shutdown is then permanently disabled,
-silently defeating the memory saving this whole type exists for.
-*Fix:* reset `outstandingRequests = 0` alongside the other per-instance state in both
-`shutdown()` and the terminate-before-relaunch branch. Add a test.
-
-**Finding B (Important) — adopted server that merely flaps gets a second process.**
-Walk it: adopt an already-running server (`didLaunch` stays false, state `.ready`) →
-health flaps false → `ensureReady()` again → fast path fails, adopt check fails (still
-unhealthy), `if didLaunch` is false so no terminate fires (**correct — we must never
-terminate a server we did not start**), and it proceeds to launch. Now a second,
-self-owned multi-gigabyte process runs alongside the adopted one.
-*Fix:* decide and implement deliberate behavior for "adopted server is unhealthy". Do
-**not** terminate it. Reasonable options: refuse to launch and report unavailable, or
-launch only after the adopted server has been unhealthy across a bounded number of
-checks. State your choice and reasoning in the report. Add a test.
-
-**Also worth closing:** the concurrency test `concurrentEnsureReadyLaunchesOnce` is
-probabilistic — reported to fail only 3/5 runs when the coalescing is removed, so CI
-could pass 40% of the time with the invariant broken. Spurious-failure risk on correct
-code is low. Making it deterministic (e.g. gate both `isHealthy` calls on a shared
-continuation that resumes only once both tasks have entered) would be a real
-improvement.
-
-Then run a scoped re-review of the fix diff before moving on.
-
-### 5c. Task 4 re-review — not yet done
-Commit `863496a` fixed four Important findings but has **not been re-reviewed**.
-Verify: the inventory and `InstalledApplicationResolver` now enumerate the same URL
-universe (same roots, same recursion, same case-insensitive `.app` check); the
-trimmed-empty display-name guard; duplicate-named apps excluded from the inventory
-entirely rather than deduped to an arbitrary winner; and that the cross-task guard test
-still hard-fails on `.notFound` and names the offending app.
-
-### 5d. Task 6 — wiring, not started
-Brief already generated at
-`.superpowers/sdd/2026-08-01-sub-b-local-brain/task-6-brief.md`.
-Wire the brain into `AvatarModel.previewCommand()` as a fallback, add the "thinking"
-state, cancel brain work on emergency stop, plain-language error strings, and the
-README section. **Task 6 is the first real caller of
-`noteRequestStarted()`/`noteRequestFinished()`** — that pairing is enforced only by
-convention, so use `defer` so a throw or cancellation cannot leak the counter.
-
-### 5e. Final whole-branch review
-Then `superpowers:finishing-a-development-branch`.
+Do **not** start Sub-B slice 2 (router/evaluator/cloud escalation) or the web tiers.
+Those require a separate spec and explicit user approval.
 
 ---
 
