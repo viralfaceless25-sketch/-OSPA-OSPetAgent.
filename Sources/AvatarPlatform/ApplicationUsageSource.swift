@@ -71,13 +71,18 @@ public struct SpotlightApplicationUsageSource: ApplicationUsageSource {
         var occurrencesByName: [String: Int] = [:]
         for url in candidateURLs {
             guard let usage = Self.usage(forApplicationAt: url, now: now) else { continue }
-            occurrencesByName[usage.displayName, default: 0] += 1
-            usageByName[usage.displayName] = usage
+            let normalizedName = InstalledApplicationResolver.normalizedApplicationName(
+                usage.displayName
+            )
+            occurrencesByName[normalizedName, default: 0] += 1
+            usageByName[normalizedName] = usage
         }
 
         return
             usageByName
-            .compactMap { name, usage in occurrencesByName[name] == 1 ? usage : nil }
+            .compactMap { normalizedName, usage in
+                occurrencesByName[normalizedName] == 1 ? usage : nil
+            }
             .sorted { $0.displayName < $1.displayName }
     }
 

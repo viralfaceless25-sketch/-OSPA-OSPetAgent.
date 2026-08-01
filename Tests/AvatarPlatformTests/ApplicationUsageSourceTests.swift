@@ -211,4 +211,32 @@ struct ApplicationUsageSourceTests {
             #expect(inventory.contains { $0.displayName == "Unique Test App" })
         }
     }
+
+    @Test("Names the resolver treats as equal are excluded as duplicates")
+    func excludesResolverEquivalentDisplayNames() throws {
+        try Self.withTemporaryDirectory { root in
+            _ = try Self.makeAppBundle(
+                named: "First.app",
+                in: root,
+                bundleIdentifier: "com.ospa.test.normalized.first",
+                displayName: "Résumé Test App"
+            )
+            _ = try Self.makeAppBundle(
+                named: "Second.app",
+                in: root,
+                bundleIdentifier: "com.ospa.test.normalized.second",
+                displayName: "resume test app"
+            )
+
+            let inventory = SpotlightApplicationUsageSource(searchDirectories: [root])
+                .currentInventory()
+
+            #expect(
+                !inventory.contains {
+                    $0.displayName == "Résumé Test App"
+                        || $0.displayName == "resume test app"
+                }
+            )
+        }
+    }
 }

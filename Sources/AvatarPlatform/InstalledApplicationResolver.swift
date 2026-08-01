@@ -22,7 +22,8 @@ public final class InstalledApplicationResolver: NSObject {
         named requestedName: String
     ) throws -> ResolvedApplication {
         let exactMatches = installedApplications().filter {
-            normalize($0.identity.displayName) == normalize(requestedName)
+            Self.normalizedApplicationName($0.identity.displayName)
+                == Self.normalizedApplicationName(requestedName)
         }
         guard !exactMatches.isEmpty else {
             throw InstalledApplicationResolutionError.notFound
@@ -274,7 +275,10 @@ public final class InstalledApplicationResolver: NSObject {
         )
     }
 
-    private func normalize(_ value: String) -> String {
+    /// Shared exact-name matching key. Inventory duplicate exclusion must use
+    /// this same normalization or it can offer two names this resolver later
+    /// rejects as ambiguous.
+    nonisolated static func normalizedApplicationName(_ value: String) -> String {
         value
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
