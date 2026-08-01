@@ -107,6 +107,25 @@ struct MLXBrainClientTests {
         }
     }
 
+    @Test("A URLError timeout is distinguished from a plain connection failure")
+    func mapsTimeoutDistinctly() async {
+        let client = MLXBrainClient(
+            transport: StubTransport(error: URLError(.timedOut))
+        )
+        await #expect(throws: LocalBrainError.timedOut) {
+            try await client.propose(request: "x", inventory: inventory)
+        }
+    }
+
+    @Test("An unrecognized transport error still degrades to unavailable")
+    func mapsUnrecognizedErrorToUnavailable() async {
+        struct Weird: Error {}
+        let client = MLXBrainClient(transport: StubTransport(error: Weird()))
+        await #expect(throws: LocalBrainError.unavailable) {
+            try await client.propose(request: "x", inventory: inventory)
+        }
+    }
+
     @Test("The request targets loopback only")
     func usesLoopback() async throws {
         let transport = CapturingTransport(response: toolCallResponse())

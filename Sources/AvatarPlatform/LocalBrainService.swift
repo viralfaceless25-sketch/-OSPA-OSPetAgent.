@@ -67,9 +67,27 @@ public struct MLXBrainClient: LocalBrainService {
         request: String,
         inventory: [InstalledApplicationUsage]
     ) async throws -> RawBrainToolCall {
-        let body = try JSONSerialization.data(
-            withJSONObject: requestPayload(request: request, inventory: inventory)
-        )
+        let body: Data
+        do {
+            body = try JSONSerialization.data(
+                withJSONObject: requestPayload(request: request, inventory: inventory)
+            )
+        } catch {
+            // Every value `requestPayload` builds today (strings, an Int, a
+            // fixed array of dictionaries) is guaranteed JSON-representable,
+            // so this is unreachable in practice. It is still caught rather
+            // than left to propagate a raw `CocoaError`, so a future edit to
+            // `requestPayload` (e.g. introducing a `Date` or a non-finite
+            // `Double`) fails the same documented `LocalBrainError` contract
+            // instead of silently breaking it. `.badResponse` is the closest
+            // fit of the four existing cases: it is the only one that
+            // carries a free-form diagnostic string, and it already means
+            // "this call could not be turned into a usable HTTP exchange" --
+            // `.unavailable`/`.timedOut` are reserved for transport-layer
+            // reachability signals (see the `post` failure handling below),
+            // and `.noToolCall` is unrelated to request construction.
+            throw LocalBrainError.badResponse("failed to encode request: \(error)")
+        }
 
         let response: (status: Int, body: Data)
         do {
@@ -77,6 +95,14 @@ public struct MLXBrainClient: LocalBrainService {
                 url: endpoint, body: body, timeout: timeout
             )
         } catch {
+            // The transport may not be URLSession-backed -- an injected fake
+            // can throw anything -- so only a recognized `URLError.timedOut`
+            // is distinguished; every other error (including unrecognized
+            // error types) degrades to `.unavailable`, which is the correct
+            // default for "the local model server could not be reached."
+            if let urlError = error as? URLError, urlError.code == .timedOut {
+                throw LocalBrainError.timedOut
+            }
             throw LocalBrainError.unavailable
         }
 
