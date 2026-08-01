@@ -163,6 +163,43 @@ struct AvatarModelBrainTests {
         )
     }
 
+    private func rawApplicationCall(
+        toolName: String = "open_application",
+        target: ResolvedApplication,
+        reason: String
+    ) throws -> RawBrainToolCall {
+        let data = try JSONSerialization.data(
+            withJSONObject: [
+                "name": target.identity.displayName,
+                "reason": reason,
+            ],
+            options: [.sortedKeys]
+        )
+        return RawBrainToolCall(
+            toolName: toolName,
+            argumentsJSON: try #require(String(data: data, encoding: .utf8))
+        )
+    }
+
+    private func brainModel(
+        applications: [ResolvedApplication],
+        calls: [RawBrainToolCall]
+    ) -> AvatarModel {
+        AvatarModel(
+            usageSource: FixedUsageSource(
+                inventory: applications.map {
+                    InstalledApplicationUsage(
+                        displayName: $0.identity.displayName,
+                        openCount: 10,
+                        lastUsedDaysAgo: 0
+                    )
+                }
+            ),
+            brainService: RecordingBrainService(.proposals(calls)),
+            brainServerController: readyServerController()
+        )
+    }
+
     private func previewBrainApplication(
         with model: AvatarModel
     ) async {
@@ -197,6 +234,145 @@ struct AvatarModelBrainTests {
         #expect(model.brainReason == nil)
         #expect(model.brainStatus == "No installed app can do that.")
         #expect(model.pendingApplicationProposal == nil)
+    }
+
+    @Test("A brain chain previews every validated step in model order")
+    func previewsOrderedBrainChain() async throws {
+        let applications = try exactInstalledApplications(count: 2)
+        let first = try #require(applications.first)
+        let second = try #require(applications.dropFirst().first)
+        let firstReason = "Start with the first requested application."
+        let secondReason = "Then open the second requested application."
+        let model = brainModel(
+            applications: applications,
+            calls: [
+                try rawApplicationCall(target: first, reason: firstReason),
+                try rawApplicationCall(target: second, reason: secondReason),
+            ]
+        )
+
+        await previewBrainApplication(with: model)
+
+        let sequence = try #require(model.pendingTaskSequence)
+        #expect(sequence.steps.count == 2)
+        #expect(
+            sequence.steps.map(\.summary)
+                == [
+                    "Open \(first.identity.displayName) — \(firstReason)",
+                    "Open \(second.identity.displayName) — \(secondReason)",
+                ]
+        )
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.brainReason == nil)
+    }
+
+    @Test("An invalid later brain call publishes no valid prefix")
+    func invalidLaterCallRefusesWholeChain() async throws {
+        let applications = try exactInstalledApplications(count: 1)
+        let first = try #require(applications.first)
+        let model = brainModel(
+            applications: applications,
+            calls: [
+                try rawApplicationCall(
+                    target: first,
+                    reason: "This valid prefix must never be published alone."
+                ),
+                RawBrainToolCall(
+                    toolName: "run_shell",
+                    argumentsJSON: #"{"reason":"unsafe"}"#
+                ),
+            ]
+        )
+
+        await previewBrainApplication(with: model)
+
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.pendingApplicationProposal == nil)
+    }
+
+    @Test("An unsupported link refuses every executable link in the chain")
+    func unsupportedLinkRefusesWholeChain() async throws {
+        let applications = try exactInstalledApplications(count: 1)
+        let first = try #require(applications.first)
+        let model = brainModel(
+            applications: applications,
+            calls: [
+                try rawApplicationCall(
+                    target: first,
+                    reason: "This app could satisfy only the first part."
+                ),
+                RawBrainToolCall(
+                    toolName: "no_supported_action",
+                    argumentsJSON:
+                        #"{"reason":"Nothing installed can do the second part."}"#
+                ),
+            ]
+        )
+
+        await previewBrainApplication(with: model)
+
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(
+            model.brainStatus
+                == "I couldn’t prepare every requested step, so nothing was prepared."
+        )
+    }
+
+    @Test("Disabling the brain clears its pending chain")
+    func disablingBrainClearsPendingChain() async throws {
+        let applications = try exactInstalledApplications(count: 2)
+        let first = try #require(applications.first)
+        let second = try #require(applications.dropFirst().first)
+        let model = brainModel(
+            applications: applications,
+            calls: [
+                try rawApplicationCall(target: first, reason: "First step."),
+                try rawApplicationCall(target: second, reason: "Second step."),
+            ]
+        )
+
+        await previewBrainApplication(with: model)
+        _ = try #require(model.pendingTaskSequence)
+
+        model.setBrainEnabled(false)
+
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus == "Natural language is off. Type exact commands.")
+    }
+
+    @Test("An expired brain chain clears its owned status with the preview")
+    func expiredBrainChainClearsStatus() async throws {
+        let applications = try exactInstalledApplications(count: 2)
+        let first = try #require(applications.first)
+        let second = try #require(applications.dropFirst().first)
+        let model = brainModel(
+            applications: applications,
+            calls: [
+                try rawApplicationCall(target: first, reason: "First step."),
+                try rawApplicationCall(target: second, reason: "Second step."),
+            ]
+        )
+
+        await previewBrainApplication(with: model)
+        let sequence = try #require(model.pendingTaskSequence)
+        model.pendingTaskSequence = TaskSequence(
+            id: sequence.id,
+            steps: sequence.steps,
+            createdAt: sequence.createdAt,
+            expiresAt: .distantPast
+        )
+        model.safety = SafetyState(observeOnly: false)
+
+        model.confirmTaskSequence()
+
+        #expect(model.pendingTaskSequence == nil)
+        #expect(
+            model.brainStatus
+                == "Natural language is on. Type what you want in ordinary words."
+        )
     }
 
     @Test("Exact typed commands never reach the brain")

@@ -5,9 +5,19 @@ import Foundation
 
 @MainActor
 final class AvatarModel: ObservableObject {
-    private struct BrainProposalBinding {
-        let planID: UUID
-        let reason: String
+    private enum BrainProposalBinding {
+        case application(planID: UUID, reason: String)
+        case taskSequence(sequenceID: UUID)
+
+        var reason: String? {
+            guard case let .application(_, reason) = self else { return nil }
+            return reason
+        }
+    }
+
+    private struct TaskSequencePreviewRequest {
+        let command: ParsedApplicationCommand
+        let reason: String?
     }
 
     @Published var isExpanded = false
@@ -28,7 +38,9 @@ final class AvatarModel: ObservableObject {
     @Published private(set) var previewAuditRecords: [PreviewAuditRecord] = []
     @Published private(set) var computerUseAuditEvents: [AuditEvent] = []
     @Published var isExecutingComputerUseAction = false
-    @Published var pendingTaskSequence: TaskSequence?
+    @Published var pendingTaskSequence: TaskSequence? {
+        didSet { clearBrainBindingIfDetached() }
+    }
     @Published private(set) var taskSequenceOutcomes: [TaskSequenceStepOutcome] = []
     @Published var isExecutingTaskSequence = false
     @Published var taskSequenceStatus =
@@ -1011,31 +1023,48 @@ final class AvatarModel: ObservableObject {
     private func previewTaskSequence(
         _ commands: [ParsedApplicationCommand]
     ) {
+        _ = previewTaskSequence(
+            commands.map {
+                TaskSequencePreviewRequest(command: $0, reason: nil)
+            }
+        )
+    }
+
+    /// Plans into a local array and publishes only after every request succeeds.
+    /// A model-produced chain therefore cannot expose a valid prefix when a
+    /// later target fails resolution or planning.
+    @discardableResult
+    private func previewTaskSequence(
+        _ requests: [TaskSequencePreviewRequest]
+    ) -> TaskSequence? {
         previewedAction = nil
         clearPendingComputerUsePlan()
         pendingApplicationProposal = nil
         applicationProposalExpiresAt = nil
         pendingApplicationSequence = nil
         applicationSequenceFirstStepCompleted = false
+        pendingTaskSequence = nil
         taskSequenceOutcomes = []
 
         let now = Date()
         var steps: [SequencedPlan] = []
 
-        for (index, command) in commands.enumerated() {
+        for (index, request) in requests.enumerated() {
             do {
                 let application = try applicationResolver.resolveExact(
-                    named: command.requestedApplicationName
+                    named: request.command.requestedApplicationName
                 )
                 let proposal = try applicationPlanner.propose(
-                    command: command,
+                    command: request.command,
                     application: application,
                     now: now
                 )
+                let action =
+                    "\(request.command.operation == .switchToRunning ? "Switch to" : "Open") \(application.identity.displayName)"
+                let summary = request.reason.map { "\(action) — \($0)" } ?? action
                 steps.append(
                     SequencedPlan(
-                        summary:
-                            "\(command.operation == .switchToRunning ? "Switch to" : "Open") \(application.identity.displayName)",
+                        summary: summary,
                         plan: proposal.plan,
                         profile: proposal.profile
                     )
@@ -1045,23 +1074,25 @@ final class AvatarModel: ObservableObject {
                 taskSequenceStatus = taskSequenceStepFailureMessage(
                     error,
                     index: index,
-                    total: commands.count,
-                    requestedName: command.requestedApplicationName
+                    total: requests.count,
+                    requestedName: request.command.requestedApplicationName
                 )
                 status = "That multi-step request was not prepared."
-                return
+                return nil
             }
         }
 
-        pendingTaskSequence = TaskSequence(
+        let sequence = TaskSequence(
             steps: steps,
             createdAt: now,
             expiresAt: now.addingTimeInterval(60)
         )
+        pendingTaskSequence = sequence
         status =
             "Prepared \(steps.count) requests. Review them, then confirm once to run them in order."
         taskSequenceStatus =
             "Nothing runs until you confirm. Each step is checked again as it starts."
+        return sequence
     }
 
     func confirmTaskSequence() {
@@ -1336,7 +1367,7 @@ final class AvatarModel: ObservableObject {
         let serverController = brainServerController
 
         brainTask = Task { [weak self] in
-            let outcome: Result<BrainProposal, any Error>
+            let outcome: Result<[BrainProposal], any Error>
             do {
                 guard await serverController.ensureReady() == .ready else {
                     throw LocalBrainError.unavailable
@@ -1347,14 +1378,12 @@ final class AvatarModel: ObservableObject {
                         inventory: inventory
                     )
                 }
-                let proposals = try validator.validate(
-                    raw,
-                    installedApplicationNames: installedNames
+                outcome = .success(
+                    try validator.validate(
+                        raw,
+                        installedApplicationNames: installedNames
+                    )
                 )
-                guard let proposal = proposals.first else {
-                    throw BrainProposalError.noToolCalls
-                }
-                outcome = .success(proposal)
             } catch {
                 outcome = .failure(error)
             }
@@ -1370,7 +1399,7 @@ final class AvatarModel: ObservableObject {
     }
 
     private func finishBrainProposal(
-        _ outcome: Result<BrainProposal, any Error>
+        _ outcome: Result<[BrainProposal], any Error>
     ) {
         brainTask = nil
         isBrainThinking = false
@@ -1381,20 +1410,58 @@ final class AvatarModel: ObservableObject {
         }
 
         switch outcome {
-        case let .success(proposal):
-            if let command = proposal.parsedApplicationCommand {
-                previewApplicationCommand(command)
-                if let planID = pendingApplicationProposal?.plan.id {
-                    bindBrainReason(proposal.reason, to: planID)
+        case let .success(proposals):
+            guard let proposal = proposals.first else {
+                brainStatus = Self.brainMessage(
+                    for: BrainProposalError.noToolCalls
+                )
+                return
+            }
+
+            if proposals.count == 1 {
+                if let command = proposal.parsedApplicationCommand {
+                    previewApplicationCommand(command)
+                    if let planID = pendingApplicationProposal?.plan.id {
+                        bindBrainReason(proposal.reason, to: planID)
+                    } else {
+                        brainStatus = proposal.reason
+                    }
                 } else {
                     brainStatus = proposal.reason
                 }
-            } else {
-                brainStatus = proposal.reason
+                return
             }
+
+            var requests: [TaskSequencePreviewRequest] = []
+            for proposal in proposals {
+                guard let command = proposal.parsedApplicationCommand else {
+                    pendingApplicationProposal = nil
+                    applicationProposalExpiresAt = nil
+                    pendingTaskSequence = nil
+                    brainStatus =
+                        "I couldn’t prepare every requested step, so nothing was prepared."
+                    return
+                }
+                requests.append(
+                    TaskSequencePreviewRequest(
+                        command: command,
+                        reason: proposal.reason
+                    )
+                )
+            }
+
+            guard let sequence = previewTaskSequence(requests) else {
+                brainStatus =
+                    "I couldn’t prepare every requested step, so nothing was prepared."
+                return
+            }
+            bindBrainSequence(to: sequence.id)
+            brainStatus =
+                "Prepared \(sequence.steps.count) requests. Review the exact list before confirming."
         case let .failure(error):
             pendingApplicationProposal = nil
             applicationProposalExpiresAt = nil
+            pendingTaskSequence = nil
             brainStatus = Self.brainMessage(for: error)
         }
     }
@@ -1411,35 +1478,56 @@ final class AvatarModel: ObservableObject {
 
     private func bindBrainReason(_ reason: String, to planID: UUID) {
         guard pendingApplicationProposal?.plan.id == planID else { return }
-        brainProposalBinding = BrainProposalBinding(
-            planID: planID,
-            reason: reason
+        brainProposalBinding = .application(
+            planID: planID, reason: reason
         )
         brainStatus = reason
     }
 
+    private func bindBrainSequence(to sequenceID: UUID) {
+        guard pendingTaskSequence?.id == sequenceID else { return }
+        brainProposalBinding = .taskSequence(sequenceID: sequenceID)
+    }
+
     private func clearBrainOriginatedProposal() {
         guard let binding = brainProposalBinding else { return }
-        if pendingApplicationProposal?.plan.id == binding.planID {
-            pendingApplicationProposal = nil
-            applicationProposalExpiresAt = nil
+        switch binding {
+        case let .application(planID, _):
+            if pendingApplicationProposal?.plan.id == planID {
+                pendingApplicationProposal = nil
+                applicationProposalExpiresAt = nil
+            }
+        case let .taskSequence(sequenceID):
+            if pendingTaskSequence?.id == sequenceID {
+                pendingTaskSequence = nil
+            }
         }
         clearBrainProposalBinding()
     }
 
     private func clearBrainBindingIfDetached() {
-        guard let binding = brainProposalBinding,
-            pendingApplicationProposal?.plan.id != binding.planID
-        else {
-            return
+        guard let binding = brainProposalBinding else { return }
+        let isDetached =
+            switch binding {
+            case let .application(planID, _):
+                pendingApplicationProposal?.plan.id != planID
+            case let .taskSequence(sequenceID):
+                pendingTaskSequence?.id != sequenceID
+            }
+        if isDetached {
+            clearBrainProposalBinding()
         }
-        clearBrainProposalBinding()
     }
 
     private func clearBrainProposalBinding() {
         guard let binding = brainProposalBinding else { return }
         brainProposalBinding = nil
-        if brainStatus == binding.reason {
+        let ownsCurrentStatus =
+            switch binding {
+            case let .application(_, reason): brainStatus == reason
+            case .taskSequence: true
+            }
+        if ownsCurrentStatus {
             brainStatus = isBrainEnabled
                 ? "Natural language is on. Type what you want in ordinary words."
                 : "Natural language is off. Type exact commands."
