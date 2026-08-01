@@ -65,14 +65,16 @@ private actor ControlledBrainService: LocalBrainService {
         started
     }
 
-    func finishAfterCancellation() {
+    func finishAfterCancellation(
+        returning calls: [RawBrainToolCall] = [
+            RawBrainToolCall(
+                toolName: "no_supported_action",
+                argumentsJSON: #"{"reason":"Late result must be ignored."}"#
+            )
+        ]
+    ) {
         continuation?.resume(
-            returning: [
-                RawBrainToolCall(
-                    toolName: "no_supported_action",
-                    argumentsJSON: #"{"reason":"Late result must be ignored."}"#
-                )
-            ]
+            returning: calls
         )
         continuation = nil
     }
@@ -364,14 +366,118 @@ struct AvatarModelBrainTests {
             createdAt: sequence.createdAt,
             expiresAt: .distantPast
         )
-        model.safety = SafetyState(observeOnly: false)
-
-        model.confirmTaskSequence()
+        await waitUntil { model.pendingTaskSequence == nil }
 
         #expect(model.pendingTaskSequence == nil)
         #expect(
             model.brainStatus
                 == "Natural language is on. Type what you want in ordinary words."
+        )
+    }
+
+    @Test("Selecting a search result replaces a completed brain chain")
+    func searchReplacementClearsBrainChain() async throws {
+        let applications = try exactInstalledApplications(count: 3)
+        let first = try #require(applications.first)
+        let second = try #require(applications.dropFirst().first)
+        let searchTarget = try #require(applications.dropFirst(2).first)
+        let model = brainModel(
+            applications: applications,
+            calls: [
+                try rawApplicationCall(target: first, reason: "First step."),
+                try rawApplicationCall(target: second, reason: "Second step."),
+            ]
+        )
+
+        await previewBrainApplication(with: model)
+        _ = try #require(model.pendingTaskSequence)
+
+        model.openSearch()
+        model.approveSearchScopes()
+        await waitUntil { model.searchStatus.hasPrefix("Ready.") }
+        model.updateSearchQuery(searchTarget.identity.displayName)
+        await waitUntil {
+            model.searchCandidates.contains {
+                $0.item.url.standardizedFileURL
+                    == searchTarget.applicationURL.standardizedFileURL
+            }
+        }
+        let replacement = try #require(
+            model.searchCandidates.first {
+                $0.item.url.standardizedFileURL
+                    == searchTarget.applicationURL.standardizedFileURL
+            }
+        )
+        model.selectSearchCandidate(replacement)
+
+        #expect(model.pendingTaskSequence == nil)
+        #expect(
+            model.pendingApplicationProposal?.application.identity
+                == searchTarget.identity
+        )
+    }
+
+    @Test("A late brain result cannot replace a selected search result")
+    func searchReplacementCancelsInFlightBrain() async throws {
+        let applications = try exactInstalledApplications(count: 2)
+        let brainTarget = try #require(applications.first)
+        let searchTarget = try #require(applications.dropFirst().first)
+        let service = ControlledBrainService()
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(
+                inventory: applications.map {
+                    InstalledApplicationUsage(
+                        displayName: $0.identity.displayName,
+                        openCount: 10,
+                        lastUsedDaysAgo: 0
+                    )
+                }
+            ),
+            brainService: service,
+            brainServerController: readyServerController()
+        )
+        model.setBrainEnabled(true)
+        model.command = "choose an app for this unusual request"
+        model.previewCommand()
+        for _ in 0..<200 {
+            if await service.hasStarted() { break }
+            await Task.yield()
+        }
+        #expect(await service.hasStarted())
+
+        model.openSearch()
+        model.approveSearchScopes()
+        await waitUntil { model.searchStatus.hasPrefix("Ready.") }
+        model.updateSearchQuery(searchTarget.identity.displayName)
+        await waitUntil {
+            model.searchCandidates.contains {
+                $0.item.url.standardizedFileURL
+                    == searchTarget.applicationURL.standardizedFileURL
+            }
+        }
+        let replacement = try #require(
+            model.searchCandidates.first {
+                $0.item.url.standardizedFileURL
+                    == searchTarget.applicationURL.standardizedFileURL
+            }
+        )
+        model.selectSearchCandidate(replacement)
+        let selectedPlanID = try #require(model.pendingApplicationProposal?.plan.id)
+
+        await service.finishAfterCancellation(
+            returning: [
+                try rawApplicationCall(
+                    target: brainTarget,
+                    reason: "This late result must be ignored."
+                )
+            ]
+        )
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(model.pendingApplicationProposal?.plan.id == selectedPlanID)
+        #expect(
+            model.pendingApplicationProposal?.application.identity
+                == searchTarget.identity
         )
     }
 

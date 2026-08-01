@@ -39,7 +39,10 @@ final class AvatarModel: ObservableObject {
     @Published private(set) var computerUseAuditEvents: [AuditEvent] = []
     @Published var isExecutingComputerUseAction = false
     @Published var pendingTaskSequence: TaskSequence? {
-        didSet { clearBrainBindingIfDetached() }
+        didSet {
+            clearBrainBindingIfDetached()
+            scheduleTaskSequenceExpiry()
+        }
     }
     @Published private(set) var taskSequenceOutcomes: [TaskSequenceStepOutcome] = []
     @Published var isExecutingTaskSequence = false
@@ -115,6 +118,12 @@ final class AvatarModel: ObservableObject {
         activationPerformer: SystemForegroundActivationPerformer(),
         consentLedger: computerUseConsentLedger
     )
+    private lazy var taskSequenceApplicationAdapter =
+        NativeApplicationPlanAdapter(
+            isEmergencyStopped: { [weak self] in
+                self?.safety.emergencyStopped ?? true
+            }
+        )
     private let taskSequenceCommandParser = TaskSequenceCommandParser()
     private let taskSequenceValidator = TaskSequenceValidator()
     private let taskSequenceRunner = TaskSequenceRunner()
@@ -133,6 +142,7 @@ final class AvatarModel: ObservableObject {
     private var brainProposalBinding: BrainProposalBinding?
     private var brainTask: Task<Void, Never>?
     private var brainIdleShutdownTask: Task<Void, Never>?
+    private var taskSequenceExpiryTask: Task<Void, Never>?
 
     init(
         usageSource: any ApplicationUsageSource = SpotlightApplicationUsageSource(),
@@ -283,6 +293,10 @@ final class AvatarModel: ObservableObject {
             return
         }
 
+        // Selecting an exact result replaces every brain-originated preview
+        // and cancels an in-flight result before it can publish over the
+        // user's newer choice.
+        cancelBrainProposal()
         spotlightOpenPreview = SpotlightOpenPreview(item: candidate.item)
         previewedAction = nil
         computerUsePreview = nil
@@ -1114,7 +1128,7 @@ final class AvatarModel: ObservableObject {
             taskSequenceStatus =
                 "Running \(validated.sequence.steps.count) requests in order…"
 
-            let adapter = computerUseAdapter
+            let adapter = taskSequenceApplicationAdapter
             Task { [weak self] in
                 guard let self else { return }
                 let result = await taskSequenceRunner.run(
@@ -1545,6 +1559,37 @@ final class AvatarModel: ObservableObject {
             }
             guard !Task.isCancelled else { return }
             await serverController.shutdownIfIdle()
+        }
+    }
+
+    private func scheduleTaskSequenceExpiry() {
+        taskSequenceExpiryTask?.cancel()
+        guard let sequence = pendingTaskSequence else {
+            taskSequenceExpiryTask = nil
+            return
+        }
+
+        let sequenceID = sequence.id
+        let expiresAt = sequence.expiresAt
+        let delay = max(0, min(expiresAt.timeIntervalSinceNow, 86_400))
+        let nanoseconds = UInt64(delay * 1_000_000_000)
+        taskSequenceExpiryTask = Task { [weak self] in
+            if nanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+            }
+            guard !Task.isCancelled, let self,
+                self.pendingTaskSequence?.id == sequenceID
+            else {
+                return
+            }
+            // A nanosecond conversion may wake just before the wall-clock
+            // deadline. Reschedule rather than leaving a stale preview.
+            guard Date() >= expiresAt else {
+                self.scheduleTaskSequenceExpiry()
+                return
+            }
+            self.pendingTaskSequence = nil
+            self.taskSequenceStatus = "That request expired. Ask again."
         }
     }
 
