@@ -143,7 +143,7 @@ public final class InstalledApplicationResolver: NSObject {
             }
         }
 
-        let applications = urls.compactMap(application(at:))
+        let applications = urls.compactMap(Self.application(at:))
         cachedInstalledApplications = applications
         return applications
     }
@@ -193,7 +193,7 @@ public final class InstalledApplicationResolver: NSObject {
             }
         }
 
-        cachedInstalledApplications = urls.compactMap(application(at:))
+        cachedInstalledApplications = urls.compactMap(Self.application(at:))
         metadataIndexComplete = true
         query.stop()
         NotificationCenter.default.removeObserver(
@@ -208,7 +208,13 @@ public final class InstalledApplicationResolver: NSObject {
         completion?(applicationsWithCurrentRunningState(), true)
     }
 
-    private func application(at url: URL) -> ResolvedApplication? {
+    /// Derives the identity macOS itself would report for an app bundle:
+    /// `CFBundleDisplayName`, falling back to `CFBundleName`, falling back to
+    /// the filename. `nonisolated static` -- not actor state, so
+    /// `ApplicationUsageSource` can share this exact derivation instead of
+    /// re-deriving display names its own way and risking disagreement with
+    /// what `resolveExact(named:)` will later resolve.
+    nonisolated static func application(at url: URL) -> ResolvedApplication? {
         guard let bundle = Bundle(url: url),
             let bundleIdentifier = bundle.bundleIdentifier
         else {
