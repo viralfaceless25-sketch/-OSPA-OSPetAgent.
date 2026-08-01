@@ -142,6 +142,8 @@ public actor LocalBrainServerController {
     /// Starts a replacement only after `ensureReady()` has observed an
     /// unhealthy server and synchronously reserved this sole startup task.
     private func startServerAfterUnhealthyProbe() async -> LocalBrainServerState {
+        guard !Task.isCancelled else { return currentState }
+
         // A previous attempt by this controller may have left a process
         // behind: a launch that succeeded but then timed out waiting for
         // health leaves `didLaunch == true` with `currentState == .failed`,
@@ -181,7 +183,9 @@ public actor LocalBrainServerController {
             // Checking health first, then the deadline, then sleeping avoids
             // both: it always attempts at least one health check, and it
             // never sleeps once the deadline has already been reached.
-            if await isHealthy() {
+            let healthy = await isHealthy()
+            guard !Task.isCancelled else { return currentState }
+            if healthy {
                 currentState = .ready
                 return .ready
             }
@@ -233,6 +237,11 @@ public actor LocalBrainServerController {
     /// Idempotent, and only ever terminates a server this controller itself
     /// launched -- an adopted server (`didLaunch == false`) is left running.
     public func shutdown() {
+        // `ensureReady()` owns an unstructured coalescing task, so cancelling
+        // its caller alone does not stop startup. Cancel it explicitly before
+        // resetting state; cancellation checks around the health suspension
+        // keep that task from later reviving `.ready`/`.failed` state.
+        inFlightEnsureReady?.cancel()
         if didLaunch {
             terminateServer()
         }

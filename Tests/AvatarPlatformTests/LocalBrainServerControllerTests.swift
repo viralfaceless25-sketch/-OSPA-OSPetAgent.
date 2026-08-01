@@ -32,6 +32,32 @@ private actor InitialHealthCheckBarrier {
     }
 }
 
+/// Lets the initial preflight fail immediately, then holds the startup health
+/// probe so a test can issue shutdown while startup is genuinely in flight.
+private actor StartupHealthCheckGate {
+    private var checks = 0
+    private var startupProbeEntered = false
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    func check() async -> Bool {
+        checks += 1
+        if checks == 1 { return false }
+        startupProbeEntered = true
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func hasEnteredStartupProbe() -> Bool {
+        startupProbeEntered
+    }
+
+    func release(_ healthy: Bool) {
+        continuation?.resume(returning: healthy)
+        continuation = nil
+    }
+}
+
 /// Controller whose server does NOT answer until it is launched. Use this for
 /// anything about launching, idle shutdown, or termination — the controller only
 /// terminates a server it started itself.
@@ -196,6 +222,35 @@ struct LocalBrainServerControllerTests {
         await controller.shutdown()
         await controller.shutdown()
 
+        #expect(recorder.terminations == 1)
+    }
+
+    @Test("Shutdown cancels an in-flight startup without reviving controller state")
+    func shutdownCancelsStartup() async {
+        let recorder = Recorder()
+        let gate = StartupHealthCheckGate()
+        let controller = LocalBrainServerController(
+            launch: { recorder.launches += 1 },
+            terminate: { recorder.terminations += 1 },
+            isHealthy: { await gate.check() },
+            now: { recorder.now },
+            startupTimeout: 0,
+            idleShutdownInterval: 300
+        )
+
+        let startup = Task { await controller.ensureReady() }
+        for _ in 0..<200 {
+            if await gate.hasEnteredStartupProbe() { break }
+            await Task.yield()
+        }
+        #expect(await gate.hasEnteredStartupProbe())
+        #expect(recorder.launches == 1)
+
+        await controller.shutdown()
+        await gate.release(false)
+
+        #expect(await startup.value == .stopped)
+        #expect(await controller.state == .stopped)
         #expect(recorder.terminations == 1)
     }
 
