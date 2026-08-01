@@ -1589,6 +1589,7 @@ final class AvatarModel: ObservableObject {
                 return
             }
             self.pendingTaskSequence = nil
+            self.status = "That request expired. Ask again."
             self.taskSequenceStatus = "That request expired. Ask again."
         }
     }

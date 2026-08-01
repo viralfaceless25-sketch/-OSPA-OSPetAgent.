@@ -369,6 +369,8 @@ struct AvatarModelBrainTests {
         await waitUntil { model.pendingTaskSequence == nil }
 
         #expect(model.pendingTaskSequence == nil)
+        #expect(model.status == "That request expired. Ask again.")
+        #expect(model.taskSequenceStatus == "That request expired. Ask again.")
         #expect(
             model.brainStatus
                 == "Natural language is on. Type what you want in ordinary words."
