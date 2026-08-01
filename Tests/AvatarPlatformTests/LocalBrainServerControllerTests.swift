@@ -58,6 +58,32 @@ private actor StartupHealthCheckGate {
     }
 }
 
+/// Holds the initial preflight probe so caller cancellation can race it before
+/// the controller has created its coalesced startup task.
+private actor InitialHealthCheckGate {
+    private var checks = 0
+    private var entered = false
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    func check() async -> Bool {
+        checks += 1
+        if checks > 1 { return false }
+        entered = true
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func hasEntered() -> Bool {
+        entered
+    }
+
+    func release(_ healthy: Bool) {
+        continuation?.resume(returning: healthy)
+        continuation = nil
+    }
+}
+
 /// Controller whose server does NOT answer until it is launched. Use this for
 /// anything about launching, idle shutdown, or termination — the controller only
 /// terminates a server it started itself.
@@ -252,6 +278,36 @@ struct LocalBrainServerControllerTests {
         #expect(await startup.value == .stopped)
         #expect(await controller.state == .stopped)
         #expect(recorder.terminations == 1)
+    }
+
+    @Test("A caller cancelled during preflight cannot launch after shutdown")
+    func cancelledPreflightDoesNotLaunch() async {
+        let recorder = Recorder()
+        let gate = InitialHealthCheckGate()
+        let controller = LocalBrainServerController(
+            launch: { recorder.launches += 1 },
+            terminate: { recorder.terminations += 1 },
+            isHealthy: { await gate.check() },
+            now: { recorder.now },
+            startupTimeout: 0,
+            idleShutdownInterval: 300
+        )
+
+        let startup = Task { await controller.ensureReady() }
+        for _ in 0..<200 {
+            if await gate.hasEntered() { break }
+            await Task.yield()
+        }
+        #expect(await gate.hasEntered())
+
+        startup.cancel()
+        await controller.shutdown()
+        await gate.release(false)
+
+        #expect(await startup.value == .stopped)
+        #expect(await controller.state == .stopped)
+        #expect(recorder.launches == 0)
+        #expect(recorder.terminations == 0)
     }
 
     @Test("A server that was never started is not terminated")

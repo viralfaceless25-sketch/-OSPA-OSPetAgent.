@@ -108,7 +108,9 @@ public actor LocalBrainServerController {
         // all establish the same initial health snapshot. The check-and-set
         // below is still actor-isolated and contains no suspension point, so
         // false probes coalesce before any launch work begins.
-        if await isHealthy() {
+        let healthy = await isHealthy()
+        guard !Task.isCancelled else { return currentState }
+        if healthy {
             return adoptOrReuseHealthyServer()
         }
 
