@@ -44,10 +44,19 @@ private func toolCallResponse(
     name: String = "open_application",
     arguments: String = #"{\"name\":\"Spotify\",\"reason\":\"music\"}"#
 ) -> Data {
-    Data(
+    toolCallResponse(calls: [(name, arguments)])
+}
+
+private func toolCallResponse(calls: [(name: String, arguments: String)]) -> Data {
+    let rendered = calls.map { call in
+        """
+        {"type":"function","function":{"name":"\(call.name)","arguments":"\(call.arguments)"}}
+        """
+    }.joined(separator: ",")
+    return Data(
         """
         {"choices":[{"message":{"role":"assistant","tool_calls":[
-        {"type":"function","function":{"name":"\(name)","arguments":"\(arguments)"}}
+        \(rendered)
         ]}}]}
         """.utf8
     )
@@ -64,11 +73,57 @@ struct MLXBrainClientTests {
     @Test("A tool call in the response becomes a raw proposal")
     func parsesToolCall() async throws {
         let client = MLXBrainClient(transport: StubTransport(body: toolCallResponse()))
-        let call = try await client.propose(
+        let calls = try await client.propose(
             request: "i want music", inventory: inventory
         )
-        #expect(call.toolName == "open_application")
-        #expect(call.argumentsJSON.contains("Spotify"))
+        #expect(calls.count == 1)
+        #expect(calls[0].toolName == "open_application")
+        #expect(calls[0].argumentsJSON.contains("Spotify"))
+    }
+
+    @Test("Every tool call is returned in model order")
+    func parsesOrderedToolCalls() async throws {
+        let body = toolCallResponse(
+            calls: [
+                (
+                    "open_application",
+                    #"{\"name\":\"Spotify\",\"reason\":\"First.\"}"#
+                ),
+                (
+                    "switch_to_application",
+                    #"{\"name\":\"Music\",\"reason\":\"Second.\"}"#
+                ),
+            ]
+        )
+        let client = MLXBrainClient(transport: StubTransport(body: body))
+
+        let calls = try await client.propose(
+            request: "open both", inventory: inventory
+        )
+
+        #expect(
+            calls.map(\.toolName)
+                == ["open_application", "switch_to_application"]
+        )
+        #expect(calls[0].argumentsJSON.contains("Spotify"))
+        #expect(calls[1].argumentsJSON.contains("Music"))
+    }
+
+    @Test("A malformed later tool call refuses the complete response")
+    func rejectsMalformedLaterToolCall() async {
+        let body = Data(
+            """
+            {"choices":[{"message":{"role":"assistant","tool_calls":[
+            {"type":"function","function":{"name":"open_application","arguments":"{\\"name\\":\\"Spotify\\",\\"reason\\":\\"Valid prefix.\\"}"}},
+            {"type":"function","function":{"arguments":"{}"}}
+            ]}}]}
+            """.utf8
+        )
+        let client = MLXBrainClient(transport: StubTransport(body: body))
+
+        await #expect(throws: LocalBrainError.badResponse("unrecognized tool call")) {
+            try await client.propose(request: "open both", inventory: inventory)
+        }
     }
 
     @Test("A response with no tool call is reported, never invented")

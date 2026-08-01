@@ -33,16 +33,16 @@ public struct URLSessionBrainTransport: BrainHTTPTransport {
     }
 }
 
-/// Turns plain language plus an app inventory into one untrusted tool call.
+/// Turns plain language plus an app inventory into ordered, untrusted tool calls.
 public protocol LocalBrainService: Sendable {
     func propose(
         request: String,
         inventory: [InstalledApplicationUsage]
-    ) async throws -> RawBrainToolCall
+    ) async throws -> [RawBrainToolCall]
 }
 
 /// Talks to a local `mlx_lm.server` over loopback using the OpenAI chat
-/// completions shape. Returns the model's tool call verbatim; validation is
+/// completions shape. Returns the model's tool calls verbatim; validation is
 /// deliberately somebody else's job.
 public struct MLXBrainClient: LocalBrainService {
     private let endpoint: URL
@@ -66,7 +66,7 @@ public struct MLXBrainClient: LocalBrainService {
     public func propose(
         request: String,
         inventory: [InstalledApplicationUsage]
-    ) async throws -> RawBrainToolCall {
+    ) async throws -> [RawBrainToolCall] {
         let body: Data
         do {
             body = try JSONSerialization.data(
@@ -109,7 +109,7 @@ public struct MLXBrainClient: LocalBrainService {
         guard response.status == 200 else {
             throw LocalBrainError.badResponse("status \(response.status)")
         }
-        return try Self.firstToolCall(in: response.body)
+        return try Self.toolCalls(in: response.body)
     }
 
     private func requestPayload(
@@ -120,7 +120,7 @@ public struct MLXBrainClient: LocalBrainService {
             "model": modelIdentifier,
             // Greedy: the same request should behave the same way every time.
             "temperature": 0,
-            "max_tokens": 200,
+            "max_tokens": 800,
             "messages": [
                 [
                     "role": "system",
@@ -202,7 +202,7 @@ public struct MLXBrainClient: LocalBrainService {
     /// `tool_calls` array all fall through to a typed error rather than a
     /// trap. Nothing here force-unwraps, force-tries, or indexes an array
     /// directly.
-    private static func firstToolCall(in data: Data) throws -> RawBrainToolCall {
+    private static func toolCalls(in data: Data) throws -> [RawBrainToolCall] {
         guard
             let root = try? JSONSerialization.jsonObject(with: data)
                 as? [String: Any],
@@ -211,20 +211,31 @@ public struct MLXBrainClient: LocalBrainService {
         else {
             throw LocalBrainError.badResponse("unrecognized response shape")
         }
-        guard
-            let calls = message["tool_calls"] as? [[String: Any]],
-            let function = calls.first?["function"] as? [String: Any],
-            let name = function["name"] as? String
+        guard let calls = message["tool_calls"] as? [[String: Any]],
+            !calls.isEmpty
         else {
             throw LocalBrainError.noToolCall
         }
-        // `arguments` is untrusted: a non-string value (missing, null,
-        // number, nested object) must not crash. Passing an empty string
-        // through is safe -- RawBrainToolCall.argumentsJSON is documented as
-        // raw, unvalidated text, and the downstream BrainProposalValidator
-        // already treats an empty/unparseable arguments string as
-        // `.malformedArguments`. This layer's only job is not to trap.
-        let arguments = function["arguments"] as? String ?? ""
-        return RawBrainToolCall(toolName: name, argumentsJSON: arguments)
+        return try calls.map { call in
+            guard
+                let function = call["function"] as? [String: Any],
+                let name = function["name"] as? String
+            else {
+                // Throwing `map`, rather than `compactMap`, makes a malformed
+                // later entry refuse the complete response. A valid prefix is
+                // never returned on its own.
+                throw LocalBrainError.badResponse("unrecognized tool call")
+            }
+            // `arguments` is untrusted: a non-string value (missing, null,
+            // number, nested object) must not crash. Passing an empty string
+            // through is safe -- RawBrainToolCall.argumentsJSON is documented
+            // as raw, unvalidated text, and BrainProposalValidator rejects it
+            // as `.malformedArguments`.
+            let arguments = function["arguments"] as? String ?? ""
+            return RawBrainToolCall(
+                toolName: name,
+                argumentsJSON: arguments
+            )
+        }
     }
 }

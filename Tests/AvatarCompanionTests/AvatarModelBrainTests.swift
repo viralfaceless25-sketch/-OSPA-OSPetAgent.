@@ -16,6 +16,7 @@ private struct FixedUsageSource: ApplicationUsageSource {
 private actor RecordingBrainService: LocalBrainService {
     enum Behavior: Sendable {
         case proposal(RawBrainToolCall)
+        case proposals([RawBrainToolCall])
         case failure(LocalBrainError)
     }
 
@@ -29,11 +30,13 @@ private actor RecordingBrainService: LocalBrainService {
     func propose(
         request: String,
         inventory: [InstalledApplicationUsage]
-    ) async throws -> RawBrainToolCall {
+    ) async throws -> [RawBrainToolCall] {
         requests.append(request)
         switch behavior {
         case let .proposal(call):
-            return call
+            return [call]
+        case let .proposals(calls):
+            return calls
         case let .failure(error):
             throw error
         }
@@ -45,13 +48,13 @@ private actor RecordingBrainService: LocalBrainService {
 }
 
 private actor ControlledBrainService: LocalBrainService {
-    private var continuation: CheckedContinuation<RawBrainToolCall, Never>?
+    private var continuation: CheckedContinuation<[RawBrainToolCall], Never>?
     private var started = false
 
     func propose(
         request: String,
         inventory: [InstalledApplicationUsage]
-    ) async throws -> RawBrainToolCall {
+    ) async throws -> [RawBrainToolCall] {
         started = true
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
@@ -64,10 +67,12 @@ private actor ControlledBrainService: LocalBrainService {
 
     func finishAfterCancellation() {
         continuation?.resume(
-            returning: RawBrainToolCall(
-                toolName: "no_supported_action",
-                argumentsJSON: #"{"reason":"Late result must be ignored."}"#
-            )
+            returning: [
+                RawBrainToolCall(
+                    toolName: "no_supported_action",
+                    argumentsJSON: #"{"reason":"Late result must be ignored."}"#
+                )
+            ]
         )
         continuation = nil
     }

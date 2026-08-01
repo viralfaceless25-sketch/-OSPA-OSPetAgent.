@@ -1347,12 +1347,14 @@ final class AvatarModel: ObservableObject {
                         inventory: inventory
                     )
                 }
-                outcome = .success(
-                    try validator.validate(
-                        raw,
-                        installedApplicationNames: installedNames
-                    )
+                let proposals = try validator.validate(
+                    raw,
+                    installedApplicationNames: installedNames
                 )
+                guard let proposal = proposals.first else {
+                    throw BrainProposalError.noToolCalls
+                }
+                outcome = .success(proposal)
             } catch {
                 outcome = .failure(error)
             }
