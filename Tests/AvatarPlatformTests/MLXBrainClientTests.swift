@@ -62,6 +62,16 @@ private func toolCallResponse(calls: [(name: String, arguments: String)]) -> Dat
     )
 }
 
+private func chatResponse(_ content: String) throws -> Data {
+    try JSONSerialization.data(
+        withJSONObject: [
+            "choices": [
+                ["message": ["role": "assistant", "content": content]]
+            ]
+        ]
+    )
+}
+
 @Suite("MLX brain client")
 struct MLXBrainClientTests {
     private let inventory = [
@@ -69,6 +79,213 @@ struct MLXBrainClientTests {
             displayName: "Spotify", openCount: 12, lastUsedDaysAgo: 0
         )
     ]
+
+    @Test("The router returns exactly one allowlisted lane")
+    func parsesIntentRoute() async throws {
+        let client = MLXBrainClient(
+            transport: StubTransport(
+                body: toolCallResponse(name: "unsupported", arguments: "{}")
+            )
+        )
+
+        let lane = try await client.route(
+            request: "what's the weather in Tokyo"
+        )
+
+        #expect(lane == .unsupported)
+    }
+
+    @Test("The router sees no inventory or action arguments")
+    func routePayloadIsClassificationOnly() async throws {
+        let transport = CapturingTransport(
+            response: toolCallResponse(name: "native_app", arguments: "{}")
+        )
+        let client = MLXBrainClient(transport: transport)
+
+        _ = try await client.route(request: "open my music app")
+
+        let body = try #require(transport.sentBody)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        let tools = try #require(object["tools"] as? [[String: Any]])
+        let functions = try tools.map { tool in
+            try #require(tool["function"] as? [String: Any])
+        }
+        #expect(
+            functions.compactMap { $0["name"] as? String }
+                == ["native_app", "chat", "unsupported"]
+        )
+        for function in functions {
+            let parameters = try #require(
+                function["parameters"] as? [String: Any]
+            )
+            #expect((parameters["properties"] as? [String: Any])?.isEmpty == true)
+            #expect(parameters["additionalProperties"] as? Bool == false)
+        }
+        #expect(object["tool_choice"] as? String == "required")
+        #expect((object["temperature"] as? Double) == 0)
+        let text = try #require(String(data: body, encoding: .utf8))
+        #expect(text.contains("open my music app"))
+        #expect(!text.contains("Spotify"))
+        #expect(!text.contains("open_application"))
+        #expect(!text.contains("switch_to_application"))
+    }
+
+    @Test("Missing or multiple routes are refused rather than guessed")
+    func rejectsWrongIntentRouteCount() async {
+        let missing = MLXBrainClient(
+            transport: StubTransport(
+                body: Data(
+                    #"{"choices":[{"message":{"role":"assistant","content":"unsupported"}}]}"#.utf8
+                )
+            )
+        )
+        await #expect(throws: LocalBrainError.noToolCall) {
+            try await missing.route(request: "weather")
+        }
+
+        let multiple = MLXBrainClient(
+            transport: StubTransport(
+                body: toolCallResponse(
+                    calls: [
+                        ("chat", "{}"),
+                        ("unsupported", "{}"),
+                    ]
+                )
+            )
+        )
+        await #expect(
+            throws: LocalBrainError.badResponse(
+                "expected exactly one intent route"
+            )
+        ) {
+            try await multiple.route(request: "weather")
+        }
+    }
+
+    @Test("Unknown routes and argument-bearing routes are refused")
+    func rejectsInvalidIntentRoute() async {
+        let unknown = MLXBrainClient(
+            transport: StubTransport(
+                body: toolCallResponse(name: "browse_web", arguments: "{}")
+            )
+        )
+        await #expect(
+            throws: LocalBrainError.badResponse("unknown intent route")
+        ) {
+            try await unknown.route(request: "weather")
+        }
+
+        let argumentBearing = MLXBrainClient(
+            transport: StubTransport(
+                body: toolCallResponse(
+                    name: "native_app",
+                    arguments: #"{\"name\":\"Safari\"}"#
+                )
+            )
+        )
+        await #expect(
+            throws: LocalBrainError.badResponse(
+                "intent route arguments must be empty"
+            )
+        ) {
+            try await argumentBearing.route(request: "weather")
+        }
+
+        let malformed = MLXBrainClient(
+            transport: StubTransport(
+                body: toolCallResponse(name: "chat", arguments: "not-json")
+            )
+        )
+        await #expect(
+            throws: LocalBrainError.badResponse(
+                "intent route arguments must be empty"
+            )
+        ) {
+            try await malformed.route(request: "hello")
+        }
+    }
+
+    @Test("Offline chat returns one trimmed safe paragraph")
+    func parsesOfflineChatResponse() async throws {
+        let client = MLXBrainClient(
+            transport: StubTransport(
+                body: try chatResponse("  Hello there.  ")
+            )
+        )
+
+        let answer = try await client.answer(request: "hello")
+
+        #expect(answer == "Hello there.")
+    }
+
+    @Test("Offline chat receives no tools or application inventory")
+    func chatPayloadCannotProposeActions() async throws {
+        let transport = CapturingTransport(
+            response: try chatResponse("A short offline answer.")
+        )
+        let client = MLXBrainClient(transport: transport)
+
+        _ = try await client.answer(request: "explain photosynthesis")
+
+        let body = try #require(transport.sentBody)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        #expect(object["tools"] == nil)
+        #expect((object["temperature"] as? Double) == 0)
+        #expect(object["max_tokens"] as? Int == 600)
+        let text = try #require(String(data: body, encoding: .utf8))
+        #expect(text.contains("explain photosynthesis"))
+        #expect(text.contains("offline"))
+        #expect(!text.contains("Spotify"))
+        #expect(!text.contains("open_application"))
+        #expect(!text.contains("native_app"))
+    }
+
+    @Test("Unsafe or unbounded chat text is refused before publication")
+    func rejectsUnsafeChatResponse() async throws {
+        let invalidAnswers = [
+            "   ",
+            String(repeating: "a", count: 2_001),
+            "unsafe\u{0007}text",
+            "misleading\u{202E}text",
+            "multiple\nlines",
+        ]
+
+        for answer in invalidAnswers {
+            let client = MLXBrainClient(
+                transport: StubTransport(
+                    body: try chatResponse(answer)
+                )
+            )
+            await #expect(
+                throws: LocalBrainError.badResponse("unsafe chat response")
+            ) {
+                try await client.answer(request: "hello")
+            }
+        }
+    }
+
+    @Test("A malformed chat response is refused rather than guessed")
+    func rejectsMalformedChatResponse() async {
+        let client = MLXBrainClient(
+            transport: StubTransport(
+                body: Data(
+                    #"{"choices":[{"message":{"role":"assistant","content":42}}]}"#.utf8
+                )
+            )
+        )
+
+        await #expect(
+            throws: LocalBrainError.badResponse(
+                "unrecognized chat response shape"
+            )
+        ) {
+            try await client.answer(request: "hello")
+        }
+    }
 
     @Test("A tool call in the response becomes a raw proposal")
     func parsesToolCall() async throws {

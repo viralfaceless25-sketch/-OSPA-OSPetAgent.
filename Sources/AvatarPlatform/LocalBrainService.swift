@@ -41,10 +41,29 @@ public protocol LocalBrainService: Sendable {
     ) async throws -> [RawBrainToolCall]
 }
 
+/// A classification only. It contains no application, arguments, or plan.
+public enum LocalBrainIntentLane: String, Equatable, Sendable {
+    case nativeApp = "native_app"
+    case chat
+    case unsupported
+}
+
+/// Chooses which existing boundary should handle otherwise-unparsed language.
+public protocol LocalBrainIntentRouting: Sendable {
+    func route(request: String) async throws -> LocalBrainIntentLane
+}
+
+/// Produces display-only offline text. It has no action or plan representation.
+public protocol LocalBrainChatService: Sendable {
+    func answer(request: String) async throws -> String
+}
+
 /// Talks to a local `mlx_lm.server` over loopback using the OpenAI chat
 /// completions shape. Returns the model's tool calls verbatim; validation is
 /// deliberately somebody else's job.
-public struct MLXBrainClient: LocalBrainService {
+public struct MLXBrainClient:
+    LocalBrainService, LocalBrainIntentRouting, LocalBrainChatService
+{
     private let endpoint: URL
     private let modelIdentifier: String
     private let timeout: TimeInterval
@@ -67,10 +86,46 @@ public struct MLXBrainClient: LocalBrainService {
         request: String,
         inventory: [InstalledApplicationUsage]
     ) async throws -> [RawBrainToolCall] {
+        let response = try await send(
+            payload: requestPayload(request: request, inventory: inventory)
+        )
+        return try Self.toolCalls(in: response)
+    }
+
+    public func route(request: String) async throws -> LocalBrainIntentLane {
+        let response = try await send(payload: routePayload(request: request))
+        let calls = try Self.toolCalls(in: response)
+        guard calls.count == 1, let call = calls.first else {
+            throw LocalBrainError.badResponse(
+                "expected exactly one intent route"
+            )
+        }
+        guard
+            let data = call.argumentsJSON.data(using: .utf8),
+            let arguments = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+            arguments.isEmpty
+        else {
+            throw LocalBrainError.badResponse(
+                "intent route arguments must be empty"
+            )
+        }
+        guard let lane = LocalBrainIntentLane(rawValue: call.toolName) else {
+            throw LocalBrainError.badResponse("unknown intent route")
+        }
+        return lane
+    }
+
+    public func answer(request: String) async throws -> String {
+        let response = try await send(payload: chatPayload(request: request))
+        return try Self.chatAnswer(in: response)
+    }
+
+    private func send(payload: [String: Any]) async throws -> Data {
         let body: Data
         do {
             body = try JSONSerialization.data(
-                withJSONObject: requestPayload(request: request, inventory: inventory)
+                withJSONObject: payload
             )
         } catch {
             // Every value `requestPayload` builds today (strings, an Int, a
@@ -109,7 +164,7 @@ public struct MLXBrainClient: LocalBrainService {
         guard response.status == 200 else {
             throw LocalBrainError.badResponse("status \(response.status)")
         }
-        return try Self.toolCalls(in: response.body)
+        return response.body
     }
 
     private func requestPayload(
@@ -129,6 +184,53 @@ public struct MLXBrainClient: LocalBrainService {
                 ["role": "user", "content": request],
             ],
             "tools": Self.toolSchemas,
+        ]
+    }
+
+    private func routePayload(request: String) -> [String: Any] {
+        [
+            "model": modelIdentifier,
+            "temperature": 0,
+            "max_tokens": 32,
+            "messages": [
+                [
+                    "role": "system",
+                    "content": """
+                        Classify the request into exactly one lane. Call one tool \
+                        and do not answer the request. Use native_app only for \
+                        requests to open, switch to, or use Mac applications. \
+                        Use chat only for conversation or timeless general \
+                        knowledge that needs no current information or action. \
+                        Use unsupported for web browsing, current information, \
+                        or any action beyond opening or switching applications.
+                        """,
+                ],
+                ["role": "user", "content": request],
+            ],
+            "tools": Self.routeToolSchemas,
+            "tool_choice": "required",
+        ]
+    }
+
+    private func chatPayload(request: String) -> [String: Any] {
+        [
+            "model": modelIdentifier,
+            "temperature": 0,
+            "max_tokens": 600,
+            "messages": [
+                [
+                    "role": "system",
+                    "content": """
+                        You are OSPA's offline chat. Answer in one short plain-text \
+                        paragraph using timeless general knowledge only. You have \
+                        no web access, current information, or action tools. Never \
+                        claim that you browsed, checked live data, or performed an \
+                        action. If the request needs those things, say plainly that \
+                        you cannot do it.
+                        """,
+                ],
+                ["role": "user", "content": request],
+            ],
         ]
     }
 
@@ -172,6 +274,42 @@ public struct MLXBrainClient: LocalBrainService {
             properties: ["reason": ["type": "string"]],
             required: ["reason"]
         ),
+        ]
+    }
+
+    private static var routeToolSchemas: [[String: Any]] {
+        [
+            routeFunctionSchema(
+                name: LocalBrainIntentLane.nativeApp.rawValue,
+                description: "The request is for one or more native Mac application actions."
+            ),
+            routeFunctionSchema(
+                name: LocalBrainIntentLane.chat.rawValue,
+                description: "The request needs only offline conversation or timeless general knowledge."
+            ),
+            routeFunctionSchema(
+                name: LocalBrainIntentLane.unsupported.rawValue,
+                description: "The request needs current or external information, web access, or an unsupported action."
+            ),
+        ]
+    }
+
+    private static func routeFunctionSchema(
+        name: String,
+        description: String
+    ) -> [String: Any] {
+        [
+            "type": "function",
+            "function": [
+                "name": name,
+                "description": description,
+                "parameters": [
+                    "type": "object",
+                    "properties": [String: Any](),
+                    "required": [String](),
+                    "additionalProperties": false,
+                ],
+            ],
         ]
     }
 
@@ -237,5 +375,35 @@ public struct MLXBrainClient: LocalBrainService {
                 argumentsJSON: arguments
             )
         }
+    }
+
+    private static func chatAnswer(in data: Data) throws -> String {
+        guard
+            let root = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+            let choices = root["choices"] as? [[String: Any]],
+            let message = choices.first?["message"] as? [String: Any],
+            let content = message["content"] as? String
+        else {
+            throw LocalBrainError.badResponse(
+                "unrecognized chat response shape"
+            )
+        }
+
+        let answer = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scalars = answer.unicodeScalars
+        guard (1...2_000).contains(scalars.count),
+            !scalars.contains(where: {
+                switch $0.properties.generalCategory {
+                case .control, .format:
+                    true
+                default:
+                    false
+                }
+            })
+        else {
+            throw LocalBrainError.badResponse("unsafe chat response")
+        }
+        return answer
     }
 }
