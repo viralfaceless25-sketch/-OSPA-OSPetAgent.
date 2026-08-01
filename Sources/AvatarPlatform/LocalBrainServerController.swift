@@ -52,6 +52,13 @@ public actor LocalBrainServerController {
     private var didLaunch = false
     private var lastRequestFinishedAt: Date?
 
+    /// Requests currently in flight against this server. `shutdownIfIdle()`
+    /// is a no-op whenever this is above zero: `lastRequestFinishedAt` alone
+    /// only records when the most recent request *completed*, so a long
+    /// outstanding request with no completion yet since the idle window
+    /// closed would otherwise look indistinguishable from genuine idleness.
+    private var outstandingRequests = 0
+
     /// Coalesces concurrent `ensureReady()` callers onto a single in-flight
     /// attempt. `ensureReady()` awaits a health-check closure, which is a
     /// suspension point -- and an actor releases its exclusivity across a
@@ -112,6 +119,22 @@ public actor LocalBrainServerController {
             return .ready
         }
 
+        // A previous attempt by this controller may have left a process
+        // behind: a launch that succeeded but then timed out waiting for
+        // health leaves `didLaunch == true` with `currentState == .failed`,
+        // and a self-launched `.ready` server that later fails a health
+        // probe (flakily or because it died) reaches here with
+        // `didLaunch == true` too. Either way, launching again without
+        // terminating first would leave two resident processes running --
+        // exactly what this lazy lifecycle exists to prevent. Terminate
+        // whatever we started before starting a replacement, so a retry
+        // always begins from a clean slate.
+        if didLaunch {
+            terminateServer()
+            didLaunch = false
+            lastRequestFinishedAt = nil
+        }
+
         currentState = .starting
         do {
             try launchServer()
@@ -146,11 +169,23 @@ public actor LocalBrainServerController {
         }
     }
 
+    /// Marks a request as begun. Pair with `noteRequestFinished()`.
+    /// `shutdownIfIdle()` refuses to act while any started request has not
+    /// yet been matched by a finish, so it can never tear the server down
+    /// out from under a live request.
+    public func noteRequestStarted() {
+        outstandingRequests += 1
+    }
+
     public func noteRequestFinished() {
+        outstandingRequests = max(0, outstandingRequests - 1)
         lastRequestFinishedAt = now()
     }
 
     public func shutdownIfIdle() async {
+        guard outstandingRequests == 0 else {
+            return
+        }
         guard currentState == .ready, let last = lastRequestFinishedAt else {
             return
         }

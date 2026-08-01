@@ -30,7 +30,15 @@ private func makeLaunchingController(
             recorder.terminations += 1
             recorder.healthy = false
         },
-        isHealthy: { recorder.healthy },
+        isHealthy: {
+            // A genuine suspension point, not just an `async`-typed closure
+            // with a synchronous body: without it, two concurrent
+            // `ensureReady()` calls are not guaranteed to actually interleave
+            // on the actor, which would make a concurrency test pass whether
+            // or not the coalescing it is meant to guard actually works.
+            await Task.yield()
+            return recorder.healthy
+        },
         now: { recorder.now },
         startupTimeout: startupTimeout,
         idleShutdownInterval: idleShutdownInterval
@@ -50,7 +58,10 @@ private func makeController(
             if let error = recorder.launchError { throw error }
         },
         terminate: { recorder.terminations += 1 },
-        isHealthy: { recorder.healthy },
+        isHealthy: {
+            await Task.yield()
+            return recorder.healthy
+        },
         now: { recorder.now },
         startupTimeout: startupTimeout,
         idleShutdownInterval: idleShutdownInterval
@@ -174,5 +185,107 @@ struct LocalBrainServerControllerTests {
         let controller = makeLaunchingController(recorder)
         await controller.shutdown()
         #expect(recorder.terminations == 0)
+    }
+
+    @Test("A failed-but-launched startup is terminated before a retry launches again")
+    func terminatesBeforeRetryingAfterTimeout() async {
+        let recorder = Recorder()
+        // Launch succeeds (a process starts) but the server never answers, so
+        // every attempt times out. Nothing in this closure ever sets
+        // `recorder.healthy`.
+        let controller = LocalBrainServerController(
+            launch: { recorder.launches += 1 },
+            terminate: {
+                recorder.terminations += 1
+                recorder.healthy = false
+            },
+            isHealthy: {
+                await Task.yield()
+                return false
+            },
+            now: { recorder.now },
+            startupTimeout: 0,
+            idleShutdownInterval: 300
+        )
+
+        let first = await controller.ensureReady()
+        guard case .failed = first else {
+            Issue.record("Expected failed state, got \(first)")
+            return
+        }
+        // Exactly one process outstanding: launched once, nothing terminated
+        // yet (there is nothing to terminate before the very first launch).
+        #expect(recorder.launches == 1)
+        #expect(recorder.terminations == 0)
+
+        let second = await controller.ensureReady()
+        guard case .failed = second else {
+            Issue.record("Expected failed state, got \(second)")
+            return
+        }
+        // The retry must terminate the first outstanding process before
+        // launching a second one -- never two resident processes at once.
+        #expect(recorder.launches == 2)
+        #expect(recorder.terminations == 1)
+    }
+
+    @Test("A self-launched ready server that goes unhealthy is terminated before relaunching")
+    func terminatesBeforeRelaunchingAfterGoingUnhealthy() async {
+        let recorder = Recorder()
+        let controller = makeLaunchingController(recorder)
+
+        #expect(await controller.ensureReady() == .ready)
+        #expect(recorder.launches == 1)
+        #expect(recorder.terminations == 0)
+
+        // The server we started goes unhealthy without `shutdown()` ever
+        // being called -- e.g. it crashed, or a health probe is flaky.
+        recorder.healthy = false
+
+        // The retry must terminate the still-tracked first process before
+        // launching a replacement.
+        #expect(await controller.ensureReady() == .ready)
+        #expect(recorder.launches == 2)
+        #expect(recorder.terminations == 1)
+    }
+
+    @Test("Two concurrent ensureReady calls coalesce into a single launch")
+    func concurrentEnsureReadyLaunchesOnce() async {
+        let recorder = Recorder()
+        let controller = makeLaunchingController(recorder)
+
+        await withTaskGroup(of: LocalBrainServerState.self) { group in
+            group.addTask { await controller.ensureReady() }
+            group.addTask { await controller.ensureReady() }
+            for await _ in group {}
+        }
+
+        #expect(recorder.launches == 1)
+    }
+
+    @Test("shutdownIfIdle refuses to stop a server with a request outstanding, and proceeds once it finishes")
+    func idleShutdownWaitsForOutstandingRequest() async {
+        let recorder = Recorder()
+        let controller = makeLaunchingController(recorder, idleShutdownInterval: 60)
+
+        _ = await controller.ensureReady()
+        await controller.noteRequestFinished()
+
+        // A new request begins. `lastRequestFinishedAt` still reflects the
+        // *previous* completed request, so as real time passes the idle
+        // window elapses even though this request is still live.
+        await controller.noteRequestStarted()
+        recorder.now = recorder.now.addingTimeInterval(120)
+        await controller.shutdownIfIdle()
+        #expect(recorder.terminations == 0)
+        #expect(await controller.state == .ready)
+
+        // The outstanding request completes; idleness is now genuine once the
+        // window elapses again.
+        await controller.noteRequestFinished()
+        recorder.now = recorder.now.addingTimeInterval(120)
+        await controller.shutdownIfIdle()
+        #expect(recorder.terminations == 1)
+        #expect(await controller.state == .stopped)
     }
 }
