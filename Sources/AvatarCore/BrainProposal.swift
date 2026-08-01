@@ -66,6 +66,11 @@ public enum BrainProposalError: Error, Equatable {
     /// operation, not exceptional: this is the hallucination backstop.
     case applicationNotInstalled(String)
     case unsafeApplicationName
+    /// The `reason` text failed a safety check (control/format characters, or
+    /// too long). `reason` is the one piece of untrusted model text that
+    /// reaches a human at the exact moment they decide whether to authorize
+    /// an action, so it is validated as strictly as `name`.
+    case unsafeReason
 }
 
 /// The sole safety authority over model output.
@@ -77,6 +82,20 @@ public enum BrainProposalError: Error, Equatable {
 public struct BrainProposalValidator: Sendable {
     private static let maximumNameLength = 80
 
+    /// A single clear English justification sentence is comfortably under
+    /// 100 characters -- every example in this file's own tests ("You use it
+    /// for music.", "Already running.", "Nothing installed can book
+    /// flights.") is under 40. 200 leaves generous headroom for a compound
+    /// sentence while remaining obviously incompatible with a
+    /// multi-kilobyte payload built to push the actual requested action
+    /// below the fold of a consent dialog.
+    private static let maximumReasonLength = 200
+
+    /// `call.toolName` is untrusted and, on the unknown-tool path, is echoed
+    /// straight into a thrown error that may eventually reach diagnostics or
+    /// UI. This bounds how much of it survives that trip.
+    private static let maximumEchoedToolNameLength = 80
+
     public init() {}
 
     public func validate(
@@ -84,18 +103,27 @@ public struct BrainProposalValidator: Sendable {
         installedApplicationNames: Set<String>
     ) throws -> BrainProposal {
         guard let tool = BrainTool(rawValue: call.toolName) else {
-            throw BrainProposalError.unknownTool(call.toolName)
+            throw BrainProposalError.unknownTool(
+                Self.sanitizedToolNameForError(call.toolName)
+            )
         }
 
         let arguments = try Self.decodeArguments(call.argumentsJSON)
-        let reason = try Self.requiredValue(named: "reason", from: arguments)
 
         switch tool {
         case .noSupportedAction:
+            let reason = try Self.requiredValue(named: "reason", from: arguments)
+            try Self.validateReasonShape(reason)
             return .noSupportedAction(reason: reason)
         case .openApplication, .switchToApplication:
+            // Validate and resolve `name` before ever looking at `reason`, so
+            // an unsafe name is reported as such even when `reason` is also
+            // missing or invalid -- an unsafe-name error must never be
+            // masked by a missing-reason error.
             let name = try Self.requiredValue(named: "name", from: arguments)
             try Self.validateNameShape(name)
+            let reason = try Self.requiredValue(named: "reason", from: arguments)
+            try Self.validateReasonShape(reason)
             guard
                 let installed = Self.installedMatch(
                     for: name,
@@ -154,13 +182,58 @@ public struct BrainProposalValidator: Sendable {
         guard !name.lowercased().contains(" and ") else {
             throw BrainProposalError.unsafeApplicationName
         }
-        guard
-            name.unicodeScalars.allSatisfy({
-                !CharacterSet.controlCharacters.contains($0)
-            })
-        else {
+        // Mirrors ApplicationCommandParser's guard against the deictic phrase
+        // "this app" (ApplicationCommand.swift): it refers to whatever
+        // happens to be focused, not a literal application identity, so it is
+        // refused unconditionally -- even if some installed application
+        // happens to be named exactly that.
+        guard name.lowercased() != "this app" else {
             throw BrainProposalError.unsafeApplicationName
         }
+        guard !containsControlOrFormatCharacter(name) else {
+            throw BrainProposalError.unsafeApplicationName
+        }
+    }
+
+    /// `reason` is the one piece of untrusted model text that reaches a human
+    /// at the moment they decide whether to authorize an action, so it gets
+    /// the same control/format-character guard as `name`, plus the length
+    /// cap documented on `maximumReasonLength`. Reject rather than truncate:
+    /// a silently truncated justification could still read as sensible while
+    /// hiding what was cut.
+    private static func validateReasonShape(_ reason: String) throws {
+        guard reason.count <= maximumReasonLength else {
+            throw BrainProposalError.unsafeReason
+        }
+        guard !containsControlOrFormatCharacter(reason) else {
+            throw BrainProposalError.unsafeReason
+        }
+    }
+
+    /// `CharacterSet.controlCharacters` spans Unicode General Categories Cc
+    /// (control -- e.g. NUL, LF, CR) *and* Cf (format -- e.g. U+200B ZERO
+    /// WIDTH SPACE, U+200C ZERO WIDTH NON-JOINER, U+202E RIGHT-TO-LEFT
+    /// OVERRIDE, U+FEFF BOM, U+00AD SOFT HYPHEN). Keeping both categories
+    /// blocked here is deliberate, not incidental: Cf characters are
+    /// invisible or bidi-reordering rather than "control" in the colloquial
+    /// sense, but they are exactly what would let a name or a consent-dialog
+    /// reason *display* as something other than what it actually is. Do NOT
+    /// replace this with a numeric range check such as `scalar.value <
+    /// 0x20` -- that covers only Cc and would silently drop all Cf
+    /// (zero-width / bidi-override) protection while every existing test
+    /// still passes.
+    private static func containsControlOrFormatCharacter(_ value: String) -> Bool {
+        value.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+    }
+
+    /// Bounds and strips `toolName` before it is allowed into a thrown error,
+    /// mirroring the same "untrusted text must not reach a display surface
+    /// unsanitized" concern as `reason` above.
+    private static func sanitizedToolNameForError(_ toolName: String) -> String {
+        let stripped = String(
+            toolName.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        )
+        return String(stripped.prefix(maximumEchoedToolNameLength))
     }
 
     /// Returns the inventory's own spelling so downstream resolution uses the
@@ -169,13 +242,18 @@ public struct BrainProposalValidator: Sendable {
         for name: String,
         in installed: Set<String>
     ) -> String? {
-        installed.first { normalize($0) == normalize(name) }
+        let target = normalize(name)
+        return installed.first { normalize($0) == target }
     }
 
     private static func normalize(_ value: String) -> String {
+        // Lowercase before precomposing, not after: `lowercased()` can itself
+        // emit a decomposed sequence (e.g. "İ".lowercased() ==
+        // "i" + U+0307 COMBINING DOT ABOVE), and composing first would leave
+        // that decomposition unrecomposed.
         value
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .precomposedStringWithCanonicalMapping
             .lowercased()
+            .precomposedStringWithCanonicalMapping
     }
 }

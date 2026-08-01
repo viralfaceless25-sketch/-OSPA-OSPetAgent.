@@ -127,15 +127,79 @@ struct BrainProposalValidatorTests {
         arguments: [
             "/Applications/Spotify.app",
             "Spotify.app",
-            "Spotify\u{0}",
+            // A JSON *escape sequence* for NUL, not a literal NUL byte: an
+            // unescaped control byte in the JSON text itself is invalid JSON
+            // and would be caught by decodeArguments before ever reaching
+            // the name-shape guard this test means to exercise.
+            "Spotify\\u0000",
             "~/Spotify",
         ]
     )
     func rejectsUnsafeNames(name: String) {
         let json = #"{"name":"\#(name)","reason":"x"}"#
-        #expect(throws: (any Error).self) {
+        #expect(throws: BrainProposalError.unsafeApplicationName) {
             try validator.validate(
                 call("open_application", json),
+                installedApplicationNames: installed
+            )
+        }
+    }
+
+    /// The zero-width space sits at U+200B, but unlike the other Cf format
+    /// characters this guard exists for, Foundation's `.whitespaces` /
+    /// `.whitespacesAndNewlines` classify it as trimmable whitespace. Placed
+    /// at the edge of a name it would simply be trimmed away before this
+    /// guard runs at all (the same as an ordinary trailing space, and just as
+    /// harmless there) -- so this test places it mid-name, where trimming
+    /// cannot remove it and the control/format-character guard is what has
+    /// to catch it.
+    @Test("A name containing a zero-width space is refused")
+    func rejectsZeroWidthSpaceInName() {
+        let name = "Spo\u{200B}tify"
+        #expect(throws: BrainProposalError.unsafeApplicationName) {
+            try validator.validate(
+                call("open_application", #"{"name":"\#(name)","reason":"x"}"#),
+                installedApplicationNames: installed
+            )
+        }
+    }
+
+    @Test("A name containing a right-to-left override character is refused")
+    func rejectsRightToLeftOverrideInName() {
+        let name = "Spotify\u{202E}"
+        #expect(throws: BrainProposalError.unsafeApplicationName) {
+            try validator.validate(
+                call("open_application", #"{"name":"\#(name)","reason":"x"}"#),
+                installedApplicationNames: installed
+            )
+        }
+    }
+
+    /// Mirrors `ApplicationCommandParser`'s refusal of the deictic phrase
+    /// "this app" (ApplicationCommand.swift:49-51). It refers to whatever is
+    /// currently focused, not a literal application identity, so it must be
+    /// refused even when an installed application happens to be named
+    /// exactly that.
+    @Test("The deictic phrase \"this app\" is refused even when literally installed")
+    func rejectsThisAppName() {
+        #expect(throws: BrainProposalError.unsafeApplicationName) {
+            try validator.validate(
+                call("open_application", #"{"name":"This App","reason":"x"}"#),
+                installedApplicationNames: ["This App"]
+            )
+        }
+    }
+
+    /// Regression test: an unsafe `name` must be reported as such even when
+    /// `reason` is also absent. Before this was fixed, `name` was never
+    /// shape-checked until after `reason` had already been extracted, so this
+    /// call reported `missingArgument("reason")` and masked the real,
+    /// more serious problem: a path in the name.
+    @Test("An unsafe name is reported even when reason is also missing")
+    func unsafeNameIsNotMaskedByMissingReason() {
+        #expect(throws: BrainProposalError.unsafeApplicationName) {
+            try validator.validate(
+                call("open_application", #"{"name":"/etc/passwd"}"#),
                 installedApplicationNames: installed
             )
         }
@@ -197,17 +261,20 @@ struct BrainProposalValidatorTests {
     /// single typed line can never be read as two application targets (that
     /// ambiguity is handled by the separate multi-clause sequence parser
     /// instead). The brief's contract requires the brain path to be at least as
-    /// strict as the typed path, so this must be refused here too, even though
-    /// the brain call only ever carries one `name` field.
-    @Test("A name containing the multi-target conjunction is refused")
-    func rejectsConjunctionInName() {
+    /// strict as the typed path, so this must be refused here too, even when
+    /// the name is the exact, real display name of an installed application --
+    /// otherwise the guard's only observable effect would be which error gets
+    /// thrown, not whether the call is accepted.
+    @Test("A name containing the multi-target conjunction is refused even when it matches an installed app")
+    func rejectsConjunctionEvenWhenNameMatchesInstalledApp() {
+        let installedWithConjunction: Set<String> = ["Bed and Breakfast Manager"]
         #expect(throws: BrainProposalError.unsafeApplicationName) {
             try validator.validate(
                 call(
                     "open_application",
-                    #"{"name":"Spotify and Chrome","reason":"x"}"#
+                    #"{"name":"Bed and Breakfast Manager","reason":"x"}"#
                 ),
-                installedApplicationNames: installed
+                installedApplicationNames: installedWithConjunction
             )
         }
     }
@@ -220,6 +287,32 @@ struct BrainProposalValidatorTests {
         #expect(throws: BrainProposalError.unknownTool("Open_Application")) {
             try validator.validate(
                 call("Open_Application", #"{"name":"Spotify","reason":"x"}"#),
+                installedApplicationNames: installed
+            )
+        }
+    }
+
+    /// An unknown tool name is echoed into the thrown error, and that error
+    /// may eventually reach diagnostics or UI, so a control character in it
+    /// must be stripped rather than carried through verbatim.
+    @Test("A control character in an unknown tool name is stripped before it is echoed")
+    func sanitizesControlCharacterInUnknownToolName() {
+        #expect(throws: BrainProposalError.unknownTool("delete_everything")) {
+            try validator.validate(
+                call("delete\u{0}_everything", #"{"name":"Spotify","reason":"x"}"#),
+                installedApplicationNames: installed
+            )
+        }
+    }
+
+    /// Same concern as above, for length rather than content: an unbounded
+    /// tool name must not be echoed unbounded.
+    @Test("An overlong unknown tool name is truncated before it is echoed")
+    func truncatesOverlongUnknownToolName() {
+        let long = String(repeating: "z", count: 200)
+        #expect(throws: BrainProposalError.unknownTool(String(long.prefix(80)))) {
+            try validator.validate(
+                call(long, #"{"name":"Spotify","reason":"x"}"#),
                 installedApplicationNames: installed
             )
         }
@@ -276,13 +369,74 @@ struct BrainProposalValidatorTests {
     /// inventory's own precomposed spelling, not the model's decomposed one.
     @Test("Unicode-normalization-equivalent names resolve to the inventory's spelling")
     func matchesAcrossUnicodeNormalization() throws {
-        let precomposed = "Cafe\u{301} Notes"  // "Café Notes", decomposed form
+        let decomposed = "Cafe\u{301} Notes"  // "Café Notes" as "e" + combining acute accent
         let canonical = "Café Notes"  // precomposed form, as the inventory holds it
-        let json = #"{"name":"\#(precomposed)","reason":"music"}"#
+        let json = #"{"name":"\#(decomposed)","reason":"music"}"#
         let proposal = try validator.validate(
             call("open_application", json),
             installedApplicationNames: [canonical]
         )
         #expect(proposal == .openApplication(name: canonical, reason: "music"))
+    }
+
+    // MARK: - Reason validation (the consent-dialog text)
+
+    /// Regression test for a verified finding: a 20,022-character `reason`
+    /// containing a bidi override and control characters was accepted
+    /// verbatim by an earlier version of this validator. `reason` is the one
+    /// piece of untrusted model text that reaches a human at the moment they
+    /// decide whether to authorize an action, so it must be validated at
+    /// least as strictly as `name`.
+    @Test("A reason containing a right-to-left override character is refused")
+    func rejectsBidiOverrideReason() {
+        let reason = "Safe\u{202E}gnihtemos"
+        #expect(throws: BrainProposalError.unsafeReason) {
+            try validator.validate(
+                call("open_application", #"{"name":"Spotify","reason":"\#(reason)"}"#),
+                installedApplicationNames: installed
+            )
+        }
+    }
+
+    @Test("A reason containing a control character is refused")
+    func rejectsControlCharacterReason() {
+        // A JSON escape sequence for NUL, not a literal NUL byte -- see the
+        // matching comment on rejectsUnsafeNames for why that distinction
+        // matters for actually reaching the guard under test. Built by
+        // concatenation, with the backslash produced by an explicit `\\`
+        // escape, so the six literal characters land in the JSON text as a
+        // NUL escape sequence rather than an actual NUL byte.
+        let json =
+            #"{"name":"Spotify","reason":"bad"# + "\\u0000" + #"reason"}"#
+        #expect(throws: BrainProposalError.unsafeReason) {
+            try validator.validate(
+                call("open_application", json),
+                installedApplicationNames: installed
+            )
+        }
+    }
+
+    @Test("An absurdly long reason is refused before it can reach a consent dialog")
+    func rejectsOverlongReason() {
+        let long = String(repeating: "a", count: 20_022)
+        #expect(throws: BrainProposalError.unsafeReason) {
+            try validator.validate(
+                call("open_application", #"{"name":"Spotify","reason":"\#(long)"}"#),
+                installedApplicationNames: installed
+            )
+        }
+    }
+
+    /// `no_supported_action` carries no `name`, but its `reason` is shown to
+    /// the user just the same, so it must get the identical guard.
+    @Test("no_supported_action's reason is validated the same way as an app-targeting call's")
+    func rejectsUnsafeReasonForNoSupportedAction() {
+        let long = String(repeating: "a", count: 300)
+        #expect(throws: BrainProposalError.unsafeReason) {
+            try validator.validate(
+                call("no_supported_action", #"{"reason":"\#(long)"}"#),
+                installedApplicationNames: installed
+            )
+        }
     }
 }
