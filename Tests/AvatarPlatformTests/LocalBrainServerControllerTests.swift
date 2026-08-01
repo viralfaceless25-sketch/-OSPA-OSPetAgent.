@@ -12,6 +12,26 @@ private final class Recorder: @unchecked Sendable {
     var now = Date(timeIntervalSince1970: 1_000_000)
 }
 
+/// Holds the first health check until a second concurrent check arrives.
+/// Calls after the first pair continue immediately.
+private actor InitialHealthCheckBarrier {
+    private var arrivals = 0
+    private var firstArrival: CheckedContinuation<Void, Never>?
+
+    func waitForBothChecks() async {
+        arrivals += 1
+        guard arrivals == 1 else {
+            firstArrival?.resume()
+            firstArrival = nil
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            firstArrival = continuation
+        }
+    }
+}
+
 /// Controller whose server does NOT answer until it is launched. Use this for
 /// anything about launching, idle shutdown, or termination — the controller only
 /// terminates a server it started itself.
@@ -252,7 +272,21 @@ struct LocalBrainServerControllerTests {
     @Test("Two concurrent ensureReady calls coalesce into a single launch")
     func concurrentEnsureReadyLaunchesOnce() async {
         let recorder = Recorder()
-        let controller = makeLaunchingController(recorder)
+        let barrier = InitialHealthCheckBarrier()
+        let controller = LocalBrainServerController(
+            launch: {
+                recorder.launches += 1
+                recorder.healthy = true
+            },
+            terminate: { recorder.terminations += 1 },
+            isHealthy: {
+                await barrier.waitForBothChecks()
+                return recorder.healthy
+            },
+            now: { recorder.now },
+            startupTimeout: 0,
+            idleShutdownInterval: 300
+        )
 
         await withTaskGroup(of: LocalBrainServerState.self) { group in
             group.addTask { await controller.ensureReady() }
@@ -261,6 +295,68 @@ struct LocalBrainServerControllerTests {
         }
 
         #expect(recorder.launches == 1)
+    }
+
+    @Test("Shutdown clears stale outstanding requests before the next server instance")
+    func shutdownResetsOutstandingRequests() async {
+        let recorder = Recorder()
+        let controller = makeLaunchingController(recorder, idleShutdownInterval: 60)
+
+        _ = await controller.ensureReady()
+        await controller.noteRequestStarted()
+        await controller.shutdown()
+
+        _ = await controller.ensureReady()
+        await controller.noteRequestStarted()
+        await controller.noteRequestFinished()
+        recorder.now = recorder.now.addingTimeInterval(120)
+        await controller.shutdownIfIdle()
+
+        #expect(recorder.terminations == 2)
+        #expect(await controller.state == .stopped)
+    }
+
+    @Test("Replacing a self-owned server clears stale outstanding requests")
+    func relaunchResetsOutstandingRequests() async {
+        let recorder = Recorder()
+        let controller = makeLaunchingController(recorder, idleShutdownInterval: 60)
+
+        _ = await controller.ensureReady()
+        await controller.noteRequestStarted()
+        await controller.noteRequestStarted()
+        recorder.healthy = false
+
+        _ = await controller.ensureReady()
+        await controller.noteRequestStarted()
+        await controller.noteRequestFinished()
+        recorder.now = recorder.now.addingTimeInterval(120)
+        await controller.shutdownIfIdle()
+
+        #expect(recorder.terminations == 2)
+        #expect(await controller.state == .stopped)
+    }
+
+    @Test("An adopted server that flaps unhealthy is never replaced or terminated")
+    func adoptedServerFailsClosedUntilItRecovers() async {
+        let recorder = Recorder()
+        recorder.healthy = true
+        let controller = makeController(recorder, startupTimeout: 0)
+
+        #expect(await controller.ensureReady() == .ready)
+        recorder.healthy = false
+
+        let unhealthyState = await controller.ensureReady()
+        guard case .failed = unhealthyState else {
+            Issue.record("Expected failed state, got \(unhealthyState)")
+            return
+        }
+        #expect(recorder.launches == 0)
+        #expect(recorder.terminations == 0)
+
+        recorder.healthy = true
+        #expect(await controller.ensureReady() == .ready)
+        #expect(recorder.launches == 0)
+        #expect(recorder.terminations == 0)
     }
 
     @Test("shutdownIfIdle refuses to stop a server with a request outstanding, and proceeds once it finishes")

@@ -39,7 +39,10 @@ public enum LocalBrainServerState: Equatable, Sendable {
 /// Only a server this controller itself launched is ever terminated. A server
 /// that was already answering when `ensureReady()` was called is adopted --
 /// left alone -- because it may belong to the user running their own model
-/// server for other work; killing it would be destructive and surprising.
+/// server for other work; killing it would be destructive and surprising. Once
+/// adopted, an unhealthy external server keeps this controller degraded until
+/// the controller is recreated (normally when the app restarts). That deliberate
+/// fail-closed tradeoff prevents an unsafe competing process from being launched.
 public actor LocalBrainServerController {
     private let launchServer: @Sendable () throws -> Void
     private let terminateServer: @Sendable () -> Void
@@ -50,6 +53,12 @@ public actor LocalBrainServerController {
 
     private var currentState: LocalBrainServerState = .stopped
     private var didLaunch = false
+    /// Once this controller has observed an already-running server, it never
+    /// starts a competing process for the rest of its lifetime. The observed
+    /// server may belong to another user or tool, and a failed health probe
+    /// cannot establish that it has exited rather than merely being transiently
+    /// unavailable.
+    private var hasAdoptedExternalServer = false
     private var lastRequestFinishedAt: Date?
 
     /// Requests currently in flight against this server. `shutdownIfIdle()`
@@ -95,30 +104,44 @@ public actor LocalBrainServerController {
     /// same attempt's result rather than launching its own (see
     /// `inFlightEnsureReady`).
     public func ensureReady() async -> LocalBrainServerState {
+        // Probe before registering the startup task so concurrent callers can
+        // all establish the same initial health snapshot. The check-and-set
+        // below is still actor-isolated and contains no suspension point, so
+        // false probes coalesce before any launch work begins.
+        if await isHealthy() {
+            return adoptOrReuseHealthyServer()
+        }
+
+        // An external server that this controller has previously adopted is
+        // never replaced. Its owner may bring it back, in which case the
+        // healthy branch above adopts/reuses it again; until then, fail closed
+        // instead of risking a competing multi-gigabyte process.
+        if hasAdoptedExternalServer, !didLaunch {
+            currentState = .failed("The externally managed local assistant is not responding.")
+            return currentState
+        }
+
         if let inFlight = inFlightEnsureReady {
             return await inFlight.value
         }
 
-        let task = Task { await self.performEnsureReady() }
+        let task = Task { await self.startServerAfterUnhealthyProbe() }
         inFlightEnsureReady = task
         defer { inFlightEnsureReady = nil }
         return await task.value
     }
 
-    private func performEnsureReady() async -> LocalBrainServerState {
-        if currentState == .ready, await isHealthy() {
-            return .ready
+    private func adoptOrReuseHealthyServer() -> LocalBrainServerState {
+        currentState = .ready
+        if !didLaunch {
+            hasAdoptedExternalServer = true
         }
+        return .ready
+    }
 
-        // Not (still) ready by our own bookkeeping. Before launching anything,
-        // check whether a server is already answering -- ours from an earlier
-        // run we lost track of, or someone else's entirely -- and adopt it
-        // without setting `didLaunch`, so `shutdown()` will never terminate it.
-        if await isHealthy() {
-            currentState = .ready
-            return .ready
-        }
-
+    /// Starts a replacement only after `ensureReady()` has observed an
+    /// unhealthy server and synchronously reserved this sole startup task.
+    private func startServerAfterUnhealthyProbe() async -> LocalBrainServerState {
         // A previous attempt by this controller may have left a process
         // behind: a launch that succeeded but then timed out waiting for
         // health leaves `didLaunch == true` with `currentState == .failed`,
@@ -133,6 +156,7 @@ public actor LocalBrainServerController {
             terminateServer()
             didLaunch = false
             lastRequestFinishedAt = nil
+            outstandingRequests = 0
         }
 
         currentState = .starting
@@ -198,13 +222,12 @@ public actor LocalBrainServerController {
     /// Idempotent, and only ever terminates a server this controller itself
     /// launched -- an adopted server (`didLaunch == false`) is left running.
     public func shutdown() {
-        guard didLaunch else {
-            currentState = .stopped
-            return
+        if didLaunch {
+            terminateServer()
         }
-        terminateServer()
         didLaunch = false
         lastRequestFinishedAt = nil
+        outstandingRequests = 0
         currentState = .stopped
     }
 }
