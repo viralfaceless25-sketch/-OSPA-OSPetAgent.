@@ -148,7 +148,9 @@ public final class InstalledApplicationResolver: NSObject {
     /// app this resolver can still find and launch, or worse, miss a
     /// same-named duplicate living one level deeper. `ApplicationUsageSource`
     /// calls this directly instead of re-implementing the traversal, so the
-    /// two components can never disagree about which URLs are candidates.
+    /// two components agree about application-directory candidates. The
+    /// resolver separately supplements them with running and metadata-query
+    /// URLs; those dynamic sources are not part of this helper's contract.
     nonisolated static func applicationBundleURLs(under root: URL) -> [URL] {
         guard
             let enumerator = FileManager.default.enumerator(

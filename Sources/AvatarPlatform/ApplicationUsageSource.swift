@@ -39,7 +39,7 @@ public struct SpotlightApplicationUsageSource: ApplicationUsageSource {
     /// against. Two properties matter for that certification to actually
     /// mean "the resolver can launch this":
     ///
-    /// 1. **Same URL universe as the resolver.** Each directory in
+    /// 1. **Same application-directory universe as the resolver.** Each directory in
     ///    `searchDirectories` is walked with
     ///    `InstalledApplicationResolver.applicationBundleURLs(under:)` --
     ///    the resolver's own traversal (recurses into ordinary subfolders,
@@ -55,7 +55,10 @@ public struct SpotlightApplicationUsageSource: ApplicationUsageSource {
     ///    Keeping one of two same-named bundles would attach the *other*
     ///    bundle's `openCount` / `lastUsedDaysAgo` to the kept entry, and
     ///    the name would still fail at resolve time with
-    ///    `.ambiguousExactName` the moment the model asked for it. Failing
+    ///    `.ambiguousExactName` the moment the model asked for it. The resolver
+    ///    can also supplement this shared filesystem universe with currently
+    ///    running or Spotlight-registered app URLs; any collision introduced by
+    ///    those dynamic sources still fails closed at resolution time. Failing
     ///    to ever offer the name is strictly better than offering it and
     ///    failing later.
     public func currentInventory() -> [InstalledApplicationUsage] {
@@ -99,8 +102,8 @@ public struct SpotlightApplicationUsageSource: ApplicationUsageSource {
     /// on a genuinely missing key, never on an empty or whitespace-only
     /// string, so a malformed bundle could otherwise produce a blank name
     /// that flows straight into the model's system prompt. Both gaps are
-    /// closed explicitly: the URL universe by `currentInventory()`, the
-    /// blank-name case immediately below.
+    /// closed explicitly for the shared application-directory universe by
+    /// `currentInventory()`, and for the blank-name case immediately below.
     public static func usage(
         forApplicationAt url: URL, now: Date
     ) -> InstalledApplicationUsage? {

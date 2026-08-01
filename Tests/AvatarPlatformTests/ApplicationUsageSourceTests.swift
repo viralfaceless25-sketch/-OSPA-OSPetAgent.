@@ -67,16 +67,15 @@ struct ApplicationUsageSourceTests {
     /// machine has two bundles named "JDownloader2" and two named "Siri")
     /// could still be *offered* by the inventory and then fail at resolve
     /// time. Now `currentInventory()` excludes any name that occurs more
-    /// than once anywhere in the same URL universe
+    /// than once anywhere in the shared application-directory universe
     /// `InstalledApplicationResolver` scans (see
     /// `InstalledApplicationResolver.applicationBundleURLs(under:)`), so a
-    /// name reaching this test is -- by construction -- unique in exactly
-    /// the universe `resolveExact(named:)` searches. If `resolveExact(named:)`
-    /// still reports `.ambiguousExactName` for such a name, the exclusion
-    /// and the resolver have silently drifted out of sync again, which is
-    /// exactly the class of regression this test exists to catch -- so it
-    /// is treated the same as `.notFound`: a hard failure naming the
-    /// offending app.
+    /// name reaching this test is unique in that shared filesystem universe.
+    /// The resolver may additionally see a currently running or Spotlight-
+    /// registered app outside those roots. If that dynamic supplement makes
+    /// the name ambiguous, resolution still fails closed and this real-system
+    /// guard reports the offending app; `.ambiguousExactName` is therefore
+    /// treated the same as `.notFound`, not silently accepted.
     @Test("Every displayName this source produces resolves through InstalledApplicationResolver")
     @MainActor
     func displayNamesResolveThroughInstalledApplicationResolver() {
