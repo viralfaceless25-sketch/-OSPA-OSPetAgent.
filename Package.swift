@@ -29,6 +29,10 @@ let package = Package(
         .testTarget(
             name: "AvatarPlatformTests",
             dependencies: ["AvatarCore", "AvatarPlatform"]
+        ),
+        .testTarget(
+            name: "AvatarCompanionTests",
+            dependencies: ["AvatarCompanion", "AvatarCore", "AvatarPlatform"]
         )
     ]
 )

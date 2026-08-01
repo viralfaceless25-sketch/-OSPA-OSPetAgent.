@@ -116,6 +116,29 @@ struct AvatarView: View {
                 .controlSize(.large)
             }
 
+            Toggle(
+                "Natural language",
+                isOn: Binding(
+                    get: { model.isBrainEnabled },
+                    set: { model.setBrainEnabled($0) }
+                )
+            )
+            .disabled(model.safety.emergencyStopped)
+            .accessibilityHint(
+                "Uses the local model only after exact command parsing declines"
+            )
+
+            HStack(alignment: .top, spacing: 6) {
+                if model.isBrainThinking {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Text(model.brainStatus)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
             Button {
                 model.openSearch()
                 searchFocused = true

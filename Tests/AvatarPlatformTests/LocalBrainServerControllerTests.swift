@@ -359,6 +359,45 @@ struct LocalBrainServerControllerTests {
         #expect(recorder.terminations == 0)
     }
 
+    @Test("Tracked requests always finish when their operation throws")
+    func trackedRequestFinishesOnThrow() async {
+        struct RequestFailure: Error {}
+
+        let recorder = Recorder()
+        let controller = makeLaunchingController(recorder, idleShutdownInterval: 0)
+        _ = await controller.ensureReady()
+
+        await #expect(throws: RequestFailure.self) {
+            try await controller.withTrackedRequest {
+                throw RequestFailure()
+            }
+        }
+
+        await controller.shutdownIfIdle()
+        #expect(recorder.terminations == 1)
+        #expect(await controller.state == .stopped)
+    }
+
+    @Test("Tracked requests always finish when their task is cancelled")
+    func trackedRequestFinishesOnCancellation() async {
+        let recorder = Recorder()
+        let controller = makeLaunchingController(recorder, idleShutdownInterval: 0)
+        _ = await controller.ensureReady()
+
+        let request = Task {
+            try await controller.withTrackedRequest {
+                try await Task.sleep(nanoseconds: .max)
+            }
+        }
+        await Task.yield()
+        request.cancel()
+        _ = try? await request.value
+
+        await controller.shutdownIfIdle()
+        #expect(recorder.terminations == 1)
+        #expect(await controller.state == .stopped)
+    }
+
     @Test("shutdownIfIdle refuses to stop a server with a request outstanding, and proceeds once it finishes")
     func idleShutdownWaitsForOutstandingRequest() async {
         let recorder = Recorder()

@@ -132,6 +132,28 @@ than half-run. A request whose later clause is a goal rather than a command —
 first step is executable and the remainder is previewed as an explicitly
 deferred, non-executable goal.
 
+## Talk to it normally
+
+Natural language is off until you turn it on. Nothing is sent anywhere: the
+model runs on this Mac. OSPA lazily starts the configured MLX runtime at
+`~/Models/.venv/bin/python`, or safely adopts a compatible server already running
+on `127.0.0.1:8081` without taking ownership of it.
+
+1. Turn on **Natural language**.
+2. Type what you want in ordinary words, for example `i wanna listen to some music`.
+3. Review the preview. It names one exact app and says why it chose it.
+4. Confirm, exactly as you would for a typed command.
+
+OSPA picks the app you actually use, not merely the one whose name matches the
+topic, by reading how often you open each app from macOS itself. It never watches
+you in the background to learn this.
+
+The model only ever chooses from applications installed on this Mac. If it names
+something that is not installed, OSPA refuses the suggestion and tells you the app
+is missing rather than acting on it. Turning natural language on does not grant any
+new ability: it can only reach actions you could already trigger by typing, and each
+one still needs the same explicit confirmation.
+
 ## Try real execution
 
 Only this flow generates input events. It stays behind every existing gate.

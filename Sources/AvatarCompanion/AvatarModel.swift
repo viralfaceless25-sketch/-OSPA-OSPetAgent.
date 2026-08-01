@@ -59,6 +59,10 @@ final class AvatarModel: ObservableObject {
         "No file or folder action is pending."
     @Published private(set) var localItemAuditEvents: [AuditEvent] = []
     @Published var isExecutingLocalItemAction = false
+    @Published var isBrainEnabled = false
+    @Published var isBrainThinking = false
+    @Published var brainStatus = "Natural language is off. Type exact commands."
+    @Published var brainReason: String?
 
     var onExpansionChanged: ((Bool) -> Void)?
     var onHide: (() -> Void)?
@@ -95,12 +99,37 @@ final class AvatarModel: ObservableObject {
     private let taskSequenceCommandParser = TaskSequenceCommandParser()
     private let taskSequenceValidator = TaskSequenceValidator()
     private let taskSequenceRunner = TaskSequenceRunner()
+    private let brainValidator = BrainProposalValidator()
+    private let usageSource: any ApplicationUsageSource
+    private let brainService: any LocalBrainService
+    private let brainServerController: LocalBrainServerController
+    private let brainIdleShutdownInterval: TimeInterval
+    private let frontmostBundleIdentifier: @MainActor @Sendable () -> String?
     private var pendingComputerUsePlan: ActionPlan?
     private var pendingComputerUseProfile: CapabilityProfile?
     private var consumedConsentGrantIDs = Set<UUID>()
     private var consumedInspectionRequestIDs = Set<UUID>()
     private var indexedApplications: [ResolvedApplication] = []
     private var personalSearchItems: [LocalSearchItem] = []
+    private var brainTask: Task<Void, Never>?
+    private var brainIdleShutdownTask: Task<Void, Never>?
+
+    init(
+        usageSource: any ApplicationUsageSource = SpotlightApplicationUsageSource(),
+        brainService: any LocalBrainService = MLXBrainClient(),
+        brainServerController: LocalBrainServerController? = nil,
+        brainIdleShutdownInterval: TimeInterval = 300,
+        frontmostBundleIdentifier: @MainActor @Sendable @escaping () -> String? = {
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        }
+    ) {
+        self.usageSource = usageSource
+        self.brainService = brainService
+        self.brainServerController =
+            brainServerController ?? Self.makeLiveBrainServerController()
+        self.brainIdleShutdownInterval = brainIdleShutdownInterval
+        self.frontmostBundleIdentifier = frontmostBundleIdentifier
+    }
 
     func toggleExpanded() {
         isExpanded.toggle()
@@ -275,6 +304,7 @@ final class AvatarModel: ObservableObject {
     }
 
     func previewCommand() {
+        cancelBrainProposal()
         spotlightOpenPreview = nil
         pendingLocalItemOpenPlan = nil
         pendingApplicationSequence = nil
@@ -333,7 +363,14 @@ final class AvatarModel: ObservableObject {
             previewedAction = nil
             pendingApplicationProposal = nil
             applicationProposalExpiresAt = nil
-            composeForegroundCommand()
+            let handledDeterministically = composeForegroundCommand(
+                reportUnsupported: !isBrainEnabled
+            )
+            if !handledDeterministically, isBrainEnabled {
+                // Deterministic parsing already declined, so ask the local model.
+                // Typed exact commands never reach this path.
+                startBrainProposal(for: command)
+            }
         case let .action(action):
             previewedAction = action
             pendingApplicationProposal = nil
@@ -374,10 +411,30 @@ final class AvatarModel: ObservableObject {
         }
     }
 
+    func setBrainEnabled(_ enabled: Bool) {
+        isBrainEnabled = enabled
+        if enabled {
+            brainStatus = "Natural language is on. Type what you want in ordinary words."
+        } else {
+            cancelBrainProposal()
+            brainReason = nil
+            brainStatus = "Natural language is off. Type exact commands."
+            brainIdleShutdownTask?.cancel()
+            brainIdleShutdownTask = nil
+            Task { await brainServerController.shutdown() }
+        }
+    }
+
     func emergencyStop() {
         safety.emergencyStopped = true
         safety.observeOnly = true
         previewedAction = nil
+        cancelBrainProposal()
+        brainIdleShutdownTask?.cancel()
+        brainIdleShutdownTask = nil
+        brainReason = nil
+        brainStatus = "Emergency stop active. Thinking cancelled."
+        Task { await brainServerController.shutdown() }
         clearPendingComputerUsePlan()
         clearAccessibilityInspection()
         pendingApplicationProposal = nil
@@ -405,6 +462,9 @@ final class AvatarModel: ObservableObject {
     func resumeObservation() {
         safety = .initial
         status = "Emergency stop cleared. Observe-only mode remains on."
+        brainStatus = isBrainEnabled
+            ? "Natural language is on. Type what you want in ordinary words."
+            : "Natural language is off. Type exact commands."
     }
 
     func identifyForegroundApp() {
@@ -1212,21 +1272,25 @@ final class AvatarModel: ObservableObject {
         buildPreview(for: intent)
     }
 
-    private func composeForegroundCommand() {
+    @discardableResult
+    private func composeForegroundCommand(
+        reportUnsupported: Bool = true
+    ) -> Bool {
         guard let app = discoveredApp else {
-            status =
-                "Not a local command. Identify the foreground app before requesting app actions."
+            if reportUnsupported {
+                status =
+                    "Not a local command. Identify the foreground app before requesting app actions."
+            }
             computerUsePreview = nil
-            return
+            return false
         }
         guard
-            NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-                == app.bundleIdentifier
+            frontmostBundleIdentifier() == app.bundleIdentifier
         else {
             status =
                 "Foreground app changed. Identify it again before composing a plan."
             computerUsePreview = nil
-            return
+            return true
         }
 
         switch foregroundComposer.compose(command, target: app) {
@@ -1234,12 +1298,183 @@ final class AvatarModel: ObservableObject {
             buildPreview(for: intent)
             status =
                 "Bound “\(intent.title)” to \(app.displayName). Review exact plan below; execution is disabled."
+            return true
         case let .ambiguous(reason):
             computerUsePreview = nil
             status = "Ambiguous request: \(reason)"
+            return true
         case let .unsupported(reason):
             computerUsePreview = nil
-            status = "Unsupported request: \(reason)"
+            if reportUnsupported {
+                status = "Unsupported request: \(reason)"
+            }
+            return false
+        }
+    }
+
+    /// Asks the local model to interpret plain language, then treats its answer
+    /// as untrusted input. A validated proposal enters the same preview path a
+    /// typed command uses, so confirmation and every downstream gate stay intact.
+    private func startBrainProposal(for request: String) {
+        brainTask?.cancel()
+        brainIdleShutdownTask?.cancel()
+        brainIdleShutdownTask = nil
+        brainReason = nil
+        isBrainThinking = true
+        brainStatus = "Thinking…"
+
+        let inventory = usageSource.currentInventory()
+        let installedNames = Set(inventory.map(\.displayName))
+        let service = brainService
+        let validator = brainValidator
+        let serverController = brainServerController
+
+        brainTask = Task { [weak self] in
+            let outcome: Result<BrainProposal, any Error>
+            do {
+                guard await serverController.ensureReady() == .ready else {
+                    throw LocalBrainError.unavailable
+                }
+                let raw = try await serverController.withTrackedRequest {
+                    try await service.propose(
+                        request: request,
+                        inventory: inventory
+                    )
+                }
+                outcome = .success(
+                    try validator.validate(
+                        raw,
+                        installedApplicationNames: installedNames
+                    )
+                )
+            } catch {
+                outcome = .failure(error)
+            }
+
+            await MainActor.run {
+                self?.scheduleBrainIdleShutdown()
+            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.finishBrainProposal(outcome)
+            }
+        }
+    }
+
+    private func finishBrainProposal(
+        _ outcome: Result<BrainProposal, any Error>
+    ) {
+        brainTask = nil
+        isBrainThinking = false
+
+        guard !safety.emergencyStopped else {
+            brainStatus = "Emergency stop is active."
+            return
+        }
+
+        switch outcome {
+        case let .success(proposal):
+            brainReason = proposal.reason
+            brainStatus = proposal.reason
+            if let command = proposal.parsedApplicationCommand {
+                previewApplicationCommand(command)
+            }
+        case let .failure(error):
+            brainReason = nil
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            brainStatus = Self.brainMessage(for: error)
+        }
+    }
+
+    private func cancelBrainProposal() {
+        brainTask?.cancel()
+        brainTask = nil
+        isBrainThinking = false
+        brainReason = nil
+        if isBrainEnabled, !safety.emergencyStopped {
+            brainStatus = "Natural language is on. Type what you want in ordinary words."
+        }
+    }
+
+    private func scheduleBrainIdleShutdown() {
+        brainIdleShutdownTask?.cancel()
+        let interval = max(0, brainIdleShutdownInterval)
+        let serverController = brainServerController
+        brainIdleShutdownTask = Task {
+            if interval > 0 {
+                let nanoseconds = UInt64(min(interval, 86_400) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: nanoseconds)
+            }
+            guard !Task.isCancelled else { return }
+            await serverController.shutdownIfIdle()
+        }
+    }
+
+    /// Plain language only. These strings are read by someone who does not know
+    /// what a model, a port, or a tool call is.
+    private static func brainMessage(for error: any Error) -> String {
+        if let proposalError = error as? BrainProposalError {
+            switch proposalError {
+            case let .applicationNotInstalled(name):
+                return "\(name) isn’t installed on this Mac."
+            case .unknownTool, .malformedArguments, .missingArgument,
+                .unsafeApplicationName, .unsafeReason:
+                return "I didn’t understand that well enough to suggest something safe."
+            }
+        }
+
+        if let localError = error as? LocalBrainError {
+            switch localError {
+            case .unavailable:
+                return "I can’t think right now. You can still type an exact command."
+            case .timedOut:
+                return "That took too long, so I stopped."
+            case .noToolCall, .badResponse:
+                return "I couldn’t work out what to do with that."
+            }
+        }
+
+        return "Something went wrong working that out."
+    }
+
+    nonisolated private static func makeLiveBrainServerController()
+        -> LocalBrainServerController
+    {
+        let executableURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Models/.venv/bin/python")
+        let process = ManagedLocalBrainProcess(
+            executableURL: executableURL,
+            arguments: [
+                "-m", "mlx_lm", "server",
+                "--model", "mlx-community/Qwen3-8B-4bit",
+                "--host", "127.0.0.1",
+                "--port", "8081",
+                "--chat-template-args", #"{"enable_thinking": false}"#,
+            ]
+        )
+
+        return LocalBrainServerController(
+            launch: { try process.launch() },
+            terminate: { process.terminate() },
+            isHealthy: { await localBrainServerIsHealthy() },
+            now: Date.init,
+            startupTimeout: 60,
+            idleShutdownInterval: 300
+        )
+    }
+
+    nonisolated private static func localBrainServerIsHealthy() async -> Bool {
+        guard let url = URL(string: "http://127.0.0.1:8081/v1/models") else {
+            return false
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            return (response as? HTTPURLResponse)?.statusCode == 200
+        } catch {
+            return false
         }
     }
 
@@ -1656,6 +1891,46 @@ final class AvatarModel: ObservableObject {
             "Action cancelled."
         case .started:
             "Action started."
+        }
+    }
+}
+
+private final class ManagedLocalBrainProcess: @unchecked Sendable {
+    private let executableURL: URL
+    private let arguments: [String]
+    private let lock = NSLock()
+    private var process: Process?
+
+    init(executableURL: URL, arguments: [String]) {
+        self.executableURL = executableURL
+        self.arguments = arguments
+    }
+
+    func launch() throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if process?.isRunning == true {
+            return
+        }
+
+        let next = Process()
+        next.executableURL = executableURL
+        next.arguments = arguments
+        next.standardOutput = FileHandle.nullDevice
+        next.standardError = FileHandle.nullDevice
+        try next.run()
+        process = next
+    }
+
+    func terminate() {
+        lock.lock()
+        let runningProcess = process
+        process = nil
+        lock.unlock()
+
+        if runningProcess?.isRunning == true {
+            runningProcess?.terminate()
         }
     }
 }

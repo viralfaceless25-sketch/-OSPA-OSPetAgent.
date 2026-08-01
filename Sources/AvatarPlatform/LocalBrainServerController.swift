@@ -206,6 +206,17 @@ public actor LocalBrainServerController {
         lastRequestFinishedAt = now()
     }
 
+    /// Runs one request while holding the server's in-flight lease. Keeping
+    /// the pairing here makes throws and cancellation unable to leak
+    /// `outstandingRequests` and permanently disable idle shutdown.
+    public func withTrackedRequest<T: Sendable>(
+        _ operation: @Sendable () async throws -> T
+    ) async rethrows -> T {
+        noteRequestStarted()
+        defer { noteRequestFinished() }
+        return try await operation()
+    }
+
     public func shutdownIfIdle() async {
         guard outstandingRequests == 0 else {
             return
