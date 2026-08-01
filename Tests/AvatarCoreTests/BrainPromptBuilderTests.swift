@@ -106,6 +106,14 @@ struct BrainPromptBuilderTests {
         #expect(!prompt.isEmpty)
     }
 
+    @Test("Prompt permits an ordered tool call for each requested app action")
+    func describesOrderedChains() {
+        let prompt = builder.systemPrompt(for: sample())
+        #expect(prompt.contains("one tool call per requested application action"))
+        #expect(prompt.contains("Keep the requested order"))
+        #expect(prompt.contains("at most 5 tool calls"))
+    }
+
     @Test("Maximum inventory constant is 200")
     func maximumInventoryConstant() {
         #expect(BrainPromptBuilder.maximumInventoryEntries == 200)

@@ -379,6 +379,79 @@ struct BrainProposalValidatorTests {
         #expect(proposal == .openApplication(name: canonical, reason: "music"))
     }
 
+    // MARK: - Atomic chain validation
+
+    @Test("Several valid calls are returned in model order")
+    func validatesOrderedCallChain() throws {
+        let proposals = try validator.validate(
+            [
+                call(
+                    "open_application",
+                    #"{"name":"Spotify","reason":"Play music first."}"#
+                ),
+                call(
+                    "switch_to_application",
+                    #"{"name":"Notes","reason":"Then show the notes."}"#
+                ),
+            ],
+            installedApplicationNames: installed
+        )
+
+        #expect(
+            proposals
+                == [
+                    .openApplication(
+                        name: "Spotify", reason: "Play music first."
+                    ),
+                    .switchToApplication(
+                        name: "Notes", reason: "Then show the notes."
+                    ),
+                ]
+        )
+    }
+
+    @Test("A later invalid call refuses the whole brain chain")
+    func rejectsWholeChainWhenLaterCallIsInvalid() {
+        let calls = [
+            call(
+                "open_application",
+                #"{"name":"Spotify","reason":"This valid prefix must not escape."}"#
+            ),
+            call("run_shell", #"{}"#),
+        ]
+
+        #expect(throws: BrainProposalError.unknownTool("run_shell")) {
+            try validator.validate(
+                calls,
+                installedApplicationNames: installed
+            )
+        }
+    }
+
+    @Test("An empty tool-call list is refused")
+    func rejectsEmptyCallChain() {
+        #expect(throws: BrainProposalError.noToolCalls) {
+            try validator.validate([], installedApplicationNames: installed)
+        }
+    }
+
+    @Test("More than five tool calls are refused")
+    func rejectsOversizedCallChain() {
+        let calls = (0...TaskSequence.maximumSteps).map { index in
+            call(
+                "open_application",
+                #"{"name":"Spotify","reason":"Request \#(index)."}"#
+            )
+        }
+
+        #expect(throws: BrainProposalError.tooManyToolCalls) {
+            try validator.validate(
+                calls,
+                installedApplicationNames: installed
+            )
+        }
+    }
+
     // MARK: - Reason validation (the consent-dialog text)
 
     /// Regression test for a verified finding: a 20,022-character `reason`

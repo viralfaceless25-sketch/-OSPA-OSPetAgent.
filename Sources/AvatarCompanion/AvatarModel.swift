@@ -1465,8 +1465,9 @@ final class AvatarModel: ObservableObject {
             switch proposalError {
             case let .applicationNotInstalled(name):
                 return "\(name) isn’t installed on this Mac."
-            case .unknownTool, .malformedArguments, .missingArgument,
-                .unsafeApplicationName, .unsafeReason:
+            case .noToolCalls, .tooManyToolCalls, .unknownTool,
+                .malformedArguments, .missingArgument, .unsafeApplicationName,
+                .unsafeReason:
                 return "I didn’t understand that well enough to suggest something safe."
             }
         }

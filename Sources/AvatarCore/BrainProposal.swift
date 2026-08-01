@@ -59,6 +59,8 @@ public enum BrainProposal: Equatable, Sendable {
 }
 
 public enum BrainProposalError: Error, Equatable {
+    case noToolCalls
+    case tooManyToolCalls
     case unknownTool(String)
     case malformedArguments
     case missingArgument(String)
@@ -97,6 +99,28 @@ public struct BrainProposalValidator: Sendable {
     private static let maximumEchoedToolNameLength = 80
 
     public init() {}
+
+    /// Validates a complete model response before any proposal can leave this
+    /// pure boundary. `map` may build a local prefix while checking, but a
+    /// thrown error prevents the array from being returned, so callers can
+    /// never publish a partially valid chain.
+    public func validate(
+        _ calls: [RawBrainToolCall],
+        installedApplicationNames: Set<String>
+    ) throws -> [BrainProposal] {
+        guard !calls.isEmpty else {
+            throw BrainProposalError.noToolCalls
+        }
+        guard calls.count <= TaskSequence.maximumSteps else {
+            throw BrainProposalError.tooManyToolCalls
+        }
+        return try calls.map {
+            try validate(
+                $0,
+                installedApplicationNames: installedApplicationNames
+            )
+        }
+    }
 
     public func validate(
         _ call: RawBrainToolCall,

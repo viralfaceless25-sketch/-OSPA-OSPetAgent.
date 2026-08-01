@@ -52,7 +52,9 @@ public struct BrainPromptBuilder: Sendable {
 
         return """
             You help someone use their Mac. They speak normally, not in commands.
-            Choose exactly one tool call for what they asked.
+            Choose exactly one tool call for a single application action. If they \
+            ask for several application actions, emit one tool call per requested \
+            application action, at most 5 tool calls. Keep the requested order.
 
             These are the applications installed on this Mac, most-used first, \
             with how often this person actually opens each one:
