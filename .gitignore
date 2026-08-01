@@ -4,3 +4,6 @@
 /.swiftpm/
 *.xcuserstate
 xcuserdata/
+
+# graphify knowledge graph (regenerable, local)
+graphify-out/
