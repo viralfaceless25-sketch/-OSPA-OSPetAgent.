@@ -15,17 +15,18 @@ public protocol ApplicationUsageSource: Sendable {
 /// store: the operating system already knows, the read is one-shot and
 /// read-only, and it requires no additional permission.
 public struct SpotlightApplicationUsageSource: ApplicationUsageSource {
+    /// Delegates to `InstalledApplicationResolver.applicationDirectoryRoots`
+    /// -- the same root "Applications" directories that resolver scans --
+    /// rather than maintaining an independently written list here. An
+    /// independent list is exactly how the two components' search spaces
+    /// drifted apart before: this one didn't include the sealed-volume
+    /// system-apps mirror the resolver's `FileManager` search path picks up,
+    /// and it listed `/System/Applications/Utilities` as its own root only
+    /// because it wasn't recursing into `/System/Applications` to find it.
+    /// See `currentInventory()` for how the traversal itself is kept in sync
+    /// too -- matching roots alone is not sufficient.
     public static var standardDirectories: [URL] {
-        var directories = [
-            URL(fileURLWithPath: "/Applications"),
-            URL(fileURLWithPath: "/System/Applications"),
-            URL(fileURLWithPath: "/System/Applications/Utilities"),
-        ]
-        directories.append(
-            FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Applications")
-        )
-        return directories
+        InstalledApplicationResolver.applicationDirectoryRoots
     }
 
     private let searchDirectories: [URL]
@@ -34,42 +35,67 @@ public struct SpotlightApplicationUsageSource: ApplicationUsageSource {
         self.searchDirectories = searchDirectories
     }
 
+    /// Builds the inventory the validator certifies model-chosen names
+    /// against. Two properties matter for that certification to actually
+    /// mean "the resolver can launch this":
+    ///
+    /// 1. **Same URL universe as the resolver.** Each directory in
+    ///    `searchDirectories` is walked with
+    ///    `InstalledApplicationResolver.applicationBundleURLs(under:)` --
+    ///    the resolver's own traversal (recurses into ordinary subfolders,
+    ///    never into a bundle's internals) -- rather than a
+    ///    non-recursive listing. "Only top-level bundles are considered"
+    ///    means only in the sense of never descending into a `.app`
+    ///    package's own `Contents/...`; it does NOT mean skipping ordinary
+    ///    subfolders nested under a search directory, which the resolver
+    ///    does descend into and this source must too.
+    /// 2. **No ambiguous names offered.** A display name that names more
+    ///    than one bundle anywhere in that universe is dropped from the
+    ///    inventory entirely -- not deduplicated to an arbitrary winner.
+    ///    Keeping one of two same-named bundles would attach the *other*
+    ///    bundle's `openCount` / `lastUsedDaysAgo` to the kept entry, and
+    ///    the name would still fail at resolve time with
+    ///    `.ambiguousExactName` the moment the model asked for it. Failing
+    ///    to ever offer the name is strictly better than offering it and
+    ///    failing later.
     public func currentInventory() -> [InstalledApplicationUsage] {
         let now = Date()
-        var seen = Set<String>()
-        var inventory: [InstalledApplicationUsage] = []
-
+        var candidateURLs = Set<URL>()
         for directory in searchDirectories {
-            let contents =
-                (try? FileManager.default.contentsOfDirectory(
-                    at: directory,
-                    includingPropertiesForKeys: nil,
-                    options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
-                )) ?? []
-
-            for url in contents where url.pathExtension == "app" {
-                guard let usage = Self.usage(forApplicationAt: url, now: now),
-                    seen.insert(usage.displayName).inserted
-                else { continue }
-                inventory.append(usage)
-            }
+            candidateURLs.formUnion(
+                InstalledApplicationResolver.applicationBundleURLs(under: directory)
+            )
         }
-        return inventory
+
+        var usageByName: [String: InstalledApplicationUsage] = [:]
+        var occurrencesByName: [String: Int] = [:]
+        for url in candidateURLs {
+            guard let usage = Self.usage(forApplicationAt: url, now: now) else { continue }
+            occurrencesByName[usage.displayName, default: 0] += 1
+            usageByName[usage.displayName] = usage
+        }
+
+        return
+            usageByName
+            .compactMap { name, usage in occurrencesByName[name] == 1 ? usage : nil }
+            .sorted { $0.displayName < $1.displayName }
     }
 
-    /// Only top-level bundles are considered. Spotlight's raw application query
-    /// also returns embedded helpers and updaters, which are not apps a person
-    /// would ever ask for.
-    ///
-    /// `displayName` is derived by `InstalledApplicationResolver.application(at:)`
-    /// rather than re-derived here from the filename. That function is the same
-    /// one `InstalledApplicationResolver` uses to build the list that
-    /// `resolveExact(named:)` searches, and it also applies the same
-    /// supported-package-type filter. Deriving the name any other way (e.g.
-    /// from the bundle filename) risks this source certifying a name that
-    /// `resolveExact(named:)` cannot find, or resolves to a different bundle --
-    /// see the cross-task note in the Task 4 brief. Sharing the function is
-    /// what makes the two lists agree by construction instead of by luck.
+    /// Derives `displayName` via `InstalledApplicationResolver.application(at:)`
+    /// -- the same function `InstalledApplicationResolver` uses to build the
+    /// list `resolveExact(named:)` searches, including its supported-package-type
+    /// filter -- rather than re-deriving it independently from the filename.
+    /// Sharing the derivation guarantees that *for a given URL* the two
+    /// components compute the same name. It does NOT by itself guarantee the
+    /// two components see the same *set* of URLs (see `currentInventory()`
+    /// and `InstalledApplicationResolver.applicationBundleURLs(under:)` for
+    /// that), and it does not skip a display name that is present but empty:
+    /// `CFBundleDisplayName ?? CFBundleName ?? filename` only falls through
+    /// on a genuinely missing key, never on an empty or whitespace-only
+    /// string, so a malformed bundle could otherwise produce a blank name
+    /// that flows straight into the model's system prompt. Both gaps are
+    /// closed explicitly: the URL universe by `currentInventory()`, the
+    /// blank-name case immediately below.
     public static func usage(
         forApplicationAt url: URL, now: Date
     ) -> InstalledApplicationUsage? {
@@ -77,6 +103,9 @@ public struct SpotlightApplicationUsageSource: ApplicationUsageSource {
             return nil
         }
         let displayName = resolved.identity.displayName
+        guard !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
 
         guard let item = MDItemCreateWithURL(nil, url as CFURL) else {
             return InstalledApplicationUsage(
@@ -84,11 +113,18 @@ public struct SpotlightApplicationUsageSource: ApplicationUsageSource {
             )
         }
 
+        // `kMDItemLastUsedDate` is a documented attribute with a real header
+        // declaration in `Metadata.framework`, so it is referenced directly.
+        // `kMDItemUseCount`, despite being the conventional way every
+        // developer reads Spotlight's open count, has no such declaration
+        // anywhere in the SDK headers -- the symbol exists in the compiled
+        // framework but Swift (and Clang) cannot see it without one, so the
+        // raw string literal is the only way to reference it; there is no
+        // framework constant to switch to.
         let count =
             (MDItemCopyAttribute(item, "kMDItemUseCount" as CFString) as? NSNumber)?
             .intValue ?? 0
-        let lastUsed =
-            MDItemCopyAttribute(item, "kMDItemLastUsedDate" as CFString) as? Date
+        let lastUsed = MDItemCopyAttribute(item, kMDItemLastUsedDate) as? Date
 
         return InstalledApplicationUsage(
             displayName: displayName,

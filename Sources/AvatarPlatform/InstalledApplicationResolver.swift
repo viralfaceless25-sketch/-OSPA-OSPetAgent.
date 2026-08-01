@@ -111,41 +111,68 @@ public final class InstalledApplicationResolver: NSObject {
             }
         }
 
-        let domains: FileManager.SearchPathDomainMask = [
-            .localDomainMask,
-            .systemDomainMask,
-            .userDomainMask,
-        ]
-        let roots = FileManager.default.urls(
-            for: .applicationDirectory,
-            in: domains
-        )
-        for root in roots {
-            guard
-                let enumerator = FileManager.default.enumerator(
-                    at: root,
-                    includingPropertiesForKeys: [
-                        .isDirectoryKey,
-                        .isPackageKey,
-                    ],
-                    options: [
-                        .skipsHiddenFiles,
-                        .skipsPackageDescendants,
-                    ]
-                )
-            else {
-                continue
-            }
-
-            for case let url as URL in enumerator
-            where url.pathExtension.caseInsensitiveCompare("app") == .orderedSame {
-                urls.insert(url.standardizedFileURL)
-            }
+        for root in Self.applicationDirectoryRoots {
+            urls.formUnion(Self.applicationBundleURLs(under: root))
         }
 
         let applications = urls.compactMap(Self.application(at:))
         cachedInstalledApplications = applications
         return applications
+    }
+
+    /// The root "Applications" directories macOS designates across every
+    /// `FileManager` search-path domain (local, system, user) -- typically
+    /// `/Applications`, `/System/Applications`, a sealed-volume mirror of the
+    /// latter, and `~/Applications`. Exposed here (not `public`, since it is
+    /// an implementation detail of how this resolver builds its universe of
+    /// apps, not a capability callers outside the module should depend on)
+    /// so `ApplicationUsageSource` can enumerate the exact same root set this
+    /// resolver does, rather than maintaining an independently written list
+    /// that can silently drift from what `resolveExact(named:)` actually
+    /// scans. See `applicationBundleURLs(under:)` for the traversal itself.
+    nonisolated static var applicationDirectoryRoots: [URL] {
+        FileManager.default.urls(
+            for: .applicationDirectory,
+            in: [.localDomainMask, .systemDomainMask, .userDomainMask]
+        )
+    }
+
+    /// All `.app` bundle URLs reachable under `root`: recurses into ordinary
+    /// subfolders (e.g. a vendor's own subfolder nested under `/Applications`)
+    /// but never into a bundle's own internals (`.skipsPackageDescendants`
+    /// stops descent the moment an item is itself recognized as a package).
+    /// This is deliberately more than a non-recursive directory listing --
+    /// nested vendor subfolders are real, user-visible install locations,
+    /// and a caller that only checked the top level of `root` could miss an
+    /// app this resolver can still find and launch, or worse, miss a
+    /// same-named duplicate living one level deeper. `ApplicationUsageSource`
+    /// calls this directly instead of re-implementing the traversal, so the
+    /// two components can never disagree about which URLs are candidates.
+    nonisolated static func applicationBundleURLs(under root: URL) -> [URL] {
+        guard
+            let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [
+                    .isDirectoryKey,
+                    .isPackageKey,
+                ],
+                options: [
+                    .skipsHiddenFiles,
+                    .skipsPackageDescendants,
+                ]
+            )
+        else {
+            return []
+        }
+
+        return enumerator.compactMap { entry -> URL? in
+            guard let url = entry as? URL,
+                url.pathExtension.caseInsensitiveCompare("app") == .orderedSame
+            else {
+                return nil
+            }
+            return url.standardizedFileURL
+        }
     }
 
     private func applicationsWithCurrentRunningState()

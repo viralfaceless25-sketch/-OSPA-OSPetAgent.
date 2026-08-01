@@ -61,13 +61,22 @@ struct ApplicationUsageSourceTests {
     /// agreement against the real, installed apps on this machine rather than
     /// trusting it never regresses silently.
     ///
-    /// A `.ambiguousExactName` failure is not a disagreement between the two
-    /// lists: it means this machine genuinely has two bundles that share a
-    /// display name, and `resolveExact(named:)` deliberately fails closed
-    /// rather than guessing which one the caller meant. That is acceptable.
-    /// A `.notFound` (or any other error) means the inventory produced a name
-    /// the resolver cannot see at all, which is the real defect this test
-    /// exists to catch.
+    /// `.ambiguousExactName` is now a hard failure too, not an accepted
+    /// outcome. Before this fix, `currentInventory()` kept one arbitrary
+    /// entry per duplicated name, so a genuinely ambiguous name (this
+    /// machine has two bundles named "JDownloader2" and two named "Siri")
+    /// could still be *offered* by the inventory and then fail at resolve
+    /// time. Now `currentInventory()` excludes any name that occurs more
+    /// than once anywhere in the same URL universe
+    /// `InstalledApplicationResolver` scans (see
+    /// `InstalledApplicationResolver.applicationBundleURLs(under:)`), so a
+    /// name reaching this test is -- by construction -- unique in exactly
+    /// the universe `resolveExact(named:)` searches. If `resolveExact(named:)`
+    /// still reports `.ambiguousExactName` for such a name, the exclusion
+    /// and the resolver have silently drifted out of sync again, which is
+    /// exactly the class of regression this test exists to catch -- so it
+    /// is treated the same as `.notFound`: a hard failure naming the
+    /// offending app.
     @Test("Every displayName this source produces resolves through InstalledApplicationResolver")
     @MainActor
     func displayNamesResolveThroughInstalledApplicationResolver() {
@@ -78,15 +87,128 @@ struct ApplicationUsageSourceTests {
             do {
                 let resolved = try resolver.resolveExact(named: app.displayName)
                 #expect(resolved.identity.displayName == app.displayName)
-            } catch InstalledApplicationResolutionError.ambiguousExactName {
-                // Duplicate display names exist on this machine; the resolver
-                // fails closed rather than guessing. Not a defect.
-                continue
             } catch {
                 Issue.record(
                     "resolveExact(named: \"\(app.displayName)\") failed: \(error)"
                 )
             }
+        }
+    }
+
+    // MARK: - Synthetic bundles
+
+    /// Builds a minimal, real `.app` bundle on disk (just enough for
+    /// `Bundle(url:)` to load its `Info.plist`) so the blank-name and
+    /// duplicate-name fixes below can be exercised deterministically,
+    /// without depending on whatever happens to be installed on the machine
+    /// running the test.
+    private static func makeAppBundle(
+        named name: String,
+        in root: URL,
+        bundleIdentifier: String,
+        displayName: String?
+    ) throws -> URL {
+        let appURL = root.appendingPathComponent(name)
+        let contentsURL = appURL.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(
+            at: contentsURL, withIntermediateDirectories: true
+        )
+
+        var infoPlist: [String: Any] = [
+            "CFBundleIdentifier": bundleIdentifier,
+            "CFBundlePackageType": "APPL",
+            "CFBundleExecutable": "Stub",
+        ]
+        if let displayName {
+            infoPlist["CFBundleDisplayName"] = displayName
+        }
+
+        let plistData = try PropertyListSerialization.data(
+            fromPropertyList: infoPlist, format: .xml, options: 0
+        )
+        try plistData.write(to: contentsURL.appendingPathComponent("Info.plist"))
+        return appURL
+    }
+
+    private static func withTemporaryDirectory(
+        _ body: (URL) throws -> Void
+    ) throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ApplicationUsageSourceTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try body(root)
+    }
+
+    /// Important 3: `CFBundleDisplayName ?? CFBundleName ?? filename` only
+    /// falls through on a genuinely *missing* key -- a present-but-blank
+    /// `CFBundleDisplayName` is not skipped by that chain, so a malformed
+    /// bundle could otherwise produce an empty or whitespace-only name that
+    /// flows straight into the model's system prompt. This pins the guard
+    /// that rejects it, using synthetic bundles rather than hoping the real
+    /// machine happens to have a malformed one.
+    @Test("A blank display name, empty or whitespace-only, is rejected")
+    func rejectsBlankDisplayName() throws {
+        try Self.withTemporaryDirectory { root in
+            let empty = try Self.makeAppBundle(
+                named: "Empty.app",
+                in: root,
+                bundleIdentifier: "com.ospa.test.empty",
+                displayName: ""
+            )
+            let whitespaceOnly = try Self.makeAppBundle(
+                named: "WhitespaceOnly.app",
+                in: root,
+                bundleIdentifier: "com.ospa.test.whitespace",
+                displayName: "  \t "
+            )
+
+            #expect(
+                SpotlightApplicationUsageSource.usage(forApplicationAt: empty, now: Date())
+                    == nil
+            )
+            #expect(
+                SpotlightApplicationUsageSource.usage(
+                    forApplicationAt: whitespaceOnly, now: Date()
+                ) == nil
+            )
+        }
+    }
+
+    /// Important 4: a display name that names more than one bundle must be
+    /// excluded from the inventory entirely, not deduplicated to an
+    /// arbitrary winner -- keeping one would attach the wrong bundle's usage
+    /// stats to the kept entry, and the name would still fail at resolve
+    /// time with `.ambiguousExactName` the moment it was offered. Two
+    /// bundles here share a display name; a third is unique. Only the
+    /// unique one should survive.
+    @Test("A duplicated display name is excluded from the inventory entirely")
+    func excludesDuplicateDisplayNames() throws {
+        try Self.withTemporaryDirectory { root in
+            _ = try Self.makeAppBundle(
+                named: "First.app",
+                in: root,
+                bundleIdentifier: "com.ospa.test.duplicate.first",
+                displayName: "Duplicate Test App"
+            )
+            _ = try Self.makeAppBundle(
+                named: "Second.app",
+                in: root,
+                bundleIdentifier: "com.ospa.test.duplicate.second",
+                displayName: "Duplicate Test App"
+            )
+            _ = try Self.makeAppBundle(
+                named: "Unique.app",
+                in: root,
+                bundleIdentifier: "com.ospa.test.unique",
+                displayName: "Unique Test App"
+            )
+
+            let inventory = SpotlightApplicationUsageSource(searchDirectories: [root])
+                .currentInventory()
+
+            #expect(!inventory.contains { $0.displayName == "Duplicate Test App" })
+            #expect(inventory.contains { $0.displayName == "Unique Test App" })
         }
     }
 }
