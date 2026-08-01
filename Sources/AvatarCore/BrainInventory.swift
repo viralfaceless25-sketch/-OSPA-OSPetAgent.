@@ -33,9 +33,18 @@ public struct BrainPromptBuilder: Sendable {
         let ordered =
             inventory
             .sorted {
-                $0.openCount == $1.openCount
-                    ? $0.displayName < $1.displayName
-                    : $0.openCount > $1.openCount
+                if $0.openCount != $1.openCount {
+                    return $0.openCount > $1.openCount
+                }
+                if $0.displayName != $1.displayName {
+                    return $0.displayName < $1.displayName
+                }
+                // Both have same openCount and displayName; order by recency.
+                // Lower day numbers (more recent) come first.
+                // nil (never opened) comes last.
+                let days0 = $0.lastUsedDaysAgo ?? Int.max
+                let days1 = $1.lastUsedDaysAgo ?? Int.max
+                return days0 < days1
             }
             .prefix(Self.maximumInventoryEntries)
 

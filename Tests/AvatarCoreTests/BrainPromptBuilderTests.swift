@@ -93,13 +93,54 @@ struct BrainPromptBuilderTests {
             )
         }
         let prompt = builder.systemPrompt(for: many)
-        #expect(prompt.contains("App299"))
-        #expect(!prompt.contains("App0 "))
+        // With 300 apps numbered 0-299 with openCount = their number,
+        // the 200 most-used apps are 100-299 (kept), 0-99 (dropped).
+        // Verify the boundary precisely by matching rendered lines.
+        #expect(prompt.contains("App100 (opened 100 times, last used today)"))
+        #expect(!prompt.contains("App99 (opened 99 times, last used today)"))
     }
 
     @Test("Empty inventory still produces a usable prompt")
     func handlesEmptyInventory() {
         let prompt = builder.systemPrompt(for: [])
         #expect(!prompt.isEmpty)
+    }
+
+    @Test("Maximum inventory constant is 200")
+    func maximumInventoryConstant() {
+        #expect(BrainPromptBuilder.maximumInventoryEntries == 200)
+    }
+
+    @Test("Same app with equal usage but different recency produces stable order")
+    func breaksTiesByRecency() {
+        // Two inventory inputs with the same content but different order.
+        let inventory1 = [
+            InstalledApplicationUsage(
+                displayName: "Foo", openCount: 5, lastUsedDaysAgo: 1
+            ),
+            InstalledApplicationUsage(
+                displayName: "Foo", openCount: 5, lastUsedDaysAgo: 3
+            ),
+        ]
+        let inventory2 = [
+            InstalledApplicationUsage(
+                displayName: "Foo", openCount: 5, lastUsedDaysAgo: 3
+            ),
+            InstalledApplicationUsage(
+                displayName: "Foo", openCount: 5, lastUsedDaysAgo: 1
+            ),
+        ]
+        let prompt1 = builder.systemPrompt(for: inventory1)
+        let prompt2 = builder.systemPrompt(for: inventory2)
+        // Must be byte-identical despite different input order.
+        #expect(prompt1 == prompt2)
+        // More recent (lower day count) should come first.
+        guard let recent = prompt1.range(of: "Foo (opened 5 times, last used 1 day ago)"),
+              let older = prompt1.range(of: "Foo (opened 5 times, last used 3 days ago)")
+        else {
+            Issue.record("Expected both Foo variants in prompt")
+            return
+        }
+        #expect(recent.lowerBound < older.lowerBound)
     }
 }
