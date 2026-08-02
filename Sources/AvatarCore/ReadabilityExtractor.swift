@@ -153,16 +153,36 @@ public struct ReadabilityExtractor: Sendable {
     ) -> Tag? {
         var cursor = start
         while cursor < characters.count {
-            if characters[cursor] == "<",
-                let tag = parseTag(at: cursor, in: characters),
-                tag.isClosing,
-                tag.name == name
-            {
-                return tag
+            if startsClosingTag(
+                named: name,
+                at: cursor,
+                in: characters
+            ) {
+                // A matching close-tag start with no `>` consumes the raw-text
+                // tail. Stop once instead of scanning that tail again.
+                return parseTag(at: cursor, in: characters)
             }
             cursor += 1
         }
         return nil
+    }
+
+    private static func startsClosingTag(
+        named name: String,
+        at start: Int,
+        in characters: [Character]
+    ) -> Bool {
+        let prefix = Array("</\(name)")
+        guard start + prefix.count <= characters.count else { return false }
+        for offset in prefix.indices {
+            guard String(characters[start + offset]).lowercased()
+                == String(prefix[offset]).lowercased()
+            else { return false }
+        }
+        let boundary = start + prefix.count
+        guard boundary < characters.count else { return true }
+        let character = characters[boundary]
+        return character.isWhitespace || character == ">" || character == "/"
     }
 
     private static func endOfComment(
