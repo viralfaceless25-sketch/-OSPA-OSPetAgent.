@@ -130,6 +130,8 @@ final class AvatarModel: ObservableObject {
     private let brainValidator = BrainProposalValidator()
     private let usageSource: any ApplicationUsageSource
     private let brainService: any LocalBrainService
+    private let brainIntentRouter: any LocalBrainIntentRouting
+    private let brainChatService: any LocalBrainChatService
     private let brainServerController: LocalBrainServerController
     private let brainIdleShutdownInterval: TimeInterval
     private let frontmostBundleIdentifier: @MainActor @Sendable () -> String?
@@ -147,6 +149,8 @@ final class AvatarModel: ObservableObject {
     init(
         usageSource: any ApplicationUsageSource = SpotlightApplicationUsageSource(),
         brainService: any LocalBrainService = MLXBrainClient(),
+        brainIntentRouter: any LocalBrainIntentRouting = MLXBrainClient(),
+        brainChatService: any LocalBrainChatService = MLXBrainClient(),
         brainServerController: LocalBrainServerController? = nil,
         brainIdleShutdownInterval: TimeInterval = 300,
         frontmostBundleIdentifier: @MainActor @Sendable @escaping () -> String? = {
@@ -155,6 +159,8 @@ final class AvatarModel: ObservableObject {
     ) {
         self.usageSource = usageSource
         self.brainService = brainService
+        self.brainIntentRouter = brainIntentRouter
+        self.brainChatService = brainChatService
         self.brainServerController =
             brainServerController ?? Self.makeLiveBrainServerController()
         self.brainIdleShutdownInterval = brainIdleShutdownInterval
@@ -401,9 +407,10 @@ final class AvatarModel: ObservableObject {
                 reportUnsupported: !isBrainEnabled
             )
             if !handledDeterministically, isBrainEnabled {
-                // Deterministic parsing already declined, so ask the local model.
-                // Typed exact commands never reach this path.
-                startBrainProposal(for: command)
+                // Deterministic parsing already declined, so ask the local model
+                // which lane this belongs to. Typed exact commands never reach
+                // this path, and classification never chooses an app itself.
+                startBrainRouting(for: command)
             }
         case let .action(action):
             previewedAction = action
@@ -1366,6 +1373,142 @@ final class AvatarModel: ObservableObject {
     /// Asks the local model to interpret plain language, then treats its answer
     /// as untrusted input. A validated proposal enters the same preview path a
     /// typed command uses, so confirmation and every downstream gate stay intact.
+    /// Honest copy for a request no installed capability can serve. Fixed text,
+    /// never model-authored, so an unsupported answer cannot be influenced by
+    /// the request that triggered it.
+    private static let unsupportedRequestMessage =
+        "I can’t browse the web or use current online information yet. "
+        + "I can open or switch Mac apps, or chat about things that don’t need "
+        + "current information."
+
+    /// Classifies which lane a request belongs to before any action is
+    /// considered. The router is given no application inventory and no
+    /// argument-bearing tools, so it can only pick a lane — it cannot name an
+    /// app, author arguments, build a plan, or execute anything. The
+    /// `nativeApp` lane hands straight to the unchanged proposal path, where
+    /// `BrainProposalValidator` remains the sole safety authority.
+    private func startBrainRouting(for request: String) {
+        brainTask?.cancel()
+        brainIdleShutdownTask?.cancel()
+        brainIdleShutdownTask = nil
+        clearBrainOriginatedProposal()
+        isBrainThinking = true
+        brainStatus = "Thinking…"
+
+        let router = brainIntentRouter
+        let serverController = brainServerController
+
+        brainTask = Task { [weak self] in
+            let outcome: Result<LocalBrainIntentLane, any Error>
+            do {
+                guard await serverController.ensureReady() == .ready else {
+                    throw LocalBrainError.unavailable
+                }
+                let lane = try await serverController.withTrackedRequest {
+                    try await router.route(request: request)
+                }
+                outcome = .success(lane)
+            } catch {
+                outcome = .failure(error)
+            }
+
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.finishBrainRouting(outcome, for: request)
+            }
+        }
+    }
+
+    private func finishBrainRouting(
+        _ outcome: Result<LocalBrainIntentLane, any Error>,
+        for request: String
+    ) {
+        brainTask = nil
+
+        // A late result must never publish after the user turned the brain off
+        // or hit Emergency Stop; both paths already set their own status.
+        guard isBrainEnabled, !safety.emergencyStopped else {
+            isBrainThinking = false
+            return
+        }
+
+        switch outcome {
+        case let .success(lane):
+            switch lane {
+            case .nativeApp:
+                // Unchanged slice-1 path, validator and all.
+                startBrainProposal(for: request)
+            case .chat:
+                startBrainChat(for: request)
+            case .unsupported:
+                isBrainThinking = false
+                previewedAction = nil
+                pendingApplicationProposal = nil
+                applicationProposalExpiresAt = nil
+                pendingTaskSequence = nil
+                clearBrainOriginatedProposal()
+                brainStatus = Self.unsupportedRequestMessage
+                scheduleBrainIdleShutdown()
+            }
+        case let .failure(error):
+            isBrainThinking = false
+            brainStatus = Self.brainMessage(for: error)
+            scheduleBrainIdleShutdown()
+        }
+    }
+
+    /// Answers offline, in text only. This path has no plan, no proposal, and no
+    /// action state: nothing it returns can become something OSPA does.
+    private func startBrainChat(for request: String) {
+        brainTask?.cancel()
+        isBrainThinking = true
+        brainStatus = "Thinking…"
+
+        let chatService = brainChatService
+        let serverController = brainServerController
+
+        brainTask = Task { [weak self] in
+            let outcome: Result<String, any Error>
+            do {
+                guard await serverController.ensureReady() == .ready else {
+                    throw LocalBrainError.unavailable
+                }
+                let answer = try await serverController.withTrackedRequest {
+                    try await chatService.answer(request: request)
+                }
+                outcome = .success(answer)
+            } catch {
+                outcome = .failure(error)
+            }
+
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self?.finishBrainChat(outcome)
+            }
+        }
+    }
+
+    private func finishBrainChat(_ outcome: Result<String, any Error>) {
+        brainTask = nil
+        isBrainThinking = false
+
+        guard isBrainEnabled, !safety.emergencyStopped else { return }
+
+        switch outcome {
+        case let .success(answer):
+            // Text only. No preview, no proposal, no plan.
+            previewedAction = nil
+            pendingApplicationProposal = nil
+            applicationProposalExpiresAt = nil
+            pendingTaskSequence = nil
+            clearBrainOriginatedProposal()
+            brainStatus = answer
+        case let .failure(error):
+            brainStatus = Self.brainMessage(for: error)
+        }
+        scheduleBrainIdleShutdown()
+    }
+
     private func startBrainProposal(for request: String) {
         brainTask?.cancel()
         brainIdleShutdownTask?.cancel()
@@ -1601,7 +1744,15 @@ final class AvatarModel: ObservableObject {
             switch proposalError {
             case let .applicationNotInstalled(name):
                 return "\(name) isn’t installed on this Mac."
-            case .noToolCalls, .tooManyToolCalls, .unknownTool,
+            case .unknownTool:
+                // The model understood the request and proposed something
+                // outside the closed menu. Saying "I didn't understand" would
+                // misdescribe what happened; the request was refused, not
+                // misread.
+                return
+                    "That’s not allowed. I can only open or switch apps that are "
+                    + "already installed on this Mac."
+            case .noToolCalls, .tooManyToolCalls,
                 .malformedArguments, .missingArgument, .unsafeApplicationName,
                 .unsafeReason:
                 return "I didn’t understand that well enough to suggest something safe."
