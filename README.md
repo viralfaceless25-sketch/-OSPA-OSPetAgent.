@@ -144,6 +144,12 @@ on `127.0.0.1:8081` without taking ownership of it.
 3. Review the preview. It names one exact app and says why it chose it.
 4. Confirm, exactly as you would for a typed command.
 
+Before showing a preview, a separate local evaluator scores how clearly the
+installed app matches the request. Below the 0.65 UX threshold, OSPA publishes no
+action preview and asks you to name or choose the app instead. A high score grants
+no authority: every proposal still passes `BrainProposalValidator` and every normal
+preview, confirmation, expiry, Emergency Stop, and execution check.
+
 OSPA picks the app you actually use, not merely the one whose name matches the
 topic, by reading how often you open each app from macOS itself. It never watches
 you in the background to learn this.

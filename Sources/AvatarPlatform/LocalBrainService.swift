@@ -1,4 +1,5 @@
 import AvatarCore
+import CoreFoundation
 import Foundation
 
 public enum LocalBrainError: Error, Equatable {
@@ -74,11 +75,32 @@ public protocol LocalBrainChatService: Sendable {
     func answer(request: String) async throws -> String
 }
 
+/// Display-only UX evidence. It grants no authority and cannot create a plan.
+public struct BrainProposalConfidence: Equatable, Sendable {
+    public let score: Double
+    public let alternatives: [String]
+
+    public init(score: Double, alternatives: [String]) {
+        self.score = score
+        self.alternatives = alternatives
+    }
+}
+
+/// Scores an already-validated proposal for clarification UX only.
+public protocol LocalBrainProposalEvaluating: Sendable {
+    func evaluate(
+        request: String,
+        proposals: [BrainProposal],
+        inventory: [InstalledApplicationUsage]
+    ) async throws -> BrainProposalConfidence
+}
+
 /// Talks to a local `mlx_lm.server` over loopback using the OpenAI chat
 /// completions shape. Returns the model's tool calls verbatim; validation is
 /// deliberately somebody else's job.
 public struct MLXBrainClient:
-    LocalBrainService, LocalBrainIntentRouting, LocalBrainChatService
+    LocalBrainService, LocalBrainIntentRouting, LocalBrainChatService,
+    LocalBrainProposalEvaluating
 {
     private let endpoint: URL
     private let modelIdentifier: String
@@ -160,6 +182,25 @@ public struct MLXBrainClient:
     public func answer(request: String) async throws -> String {
         let response = try await send(payload: chatPayload(request: request))
         return try Self.chatAnswer(in: response)
+    }
+
+    public func evaluate(
+        request: String,
+        proposals: [BrainProposal],
+        inventory: [InstalledApplicationUsage]
+    ) async throws -> BrainProposalConfidence {
+        let response = try await send(
+            payload: evaluatorPayload(
+                request: request,
+                proposals: proposals,
+                inventory: inventory
+            )
+        )
+        return try Self.proposalConfidence(
+            in: response,
+            proposals: proposals,
+            inventory: inventory
+        )
     }
 
     private func send(payload: [String: Any]) async throws -> Data {
@@ -287,6 +328,48 @@ public struct MLXBrainClient:
         ]
     }
 
+    private func evaluatorPayload(
+        request: String,
+        proposals: [BrainProposal],
+        inventory: [InstalledApplicationUsage]
+    ) -> [String: Any] {
+        let proposed = proposals.compactMap {
+            Self.applicationName(in: $0)
+        }
+        let installed = inventory.map {
+            "\($0.displayName) (opened \($0.openCount) times)"
+        }.joined(separator: "\n")
+        return [
+            "model": modelIdentifier,
+            "temperature": 0,
+            "max_tokens": 100,
+            "messages": [
+                [
+                    "role": "system",
+                    "content": """
+                        Score how confidently the proposed installed application \
+                        matches the request. Call score_proposal exactly once. A \
+                        score of 1 means unambiguous; 0 means a guess. If useful, \
+                        list at most two better alternatives copied exactly from \
+                        the installed list. This is evaluation only: do not choose \
+                        an action or answer the request.
+                        """,
+                ],
+                [
+                    "role": "user",
+                    "content": """
+                        Request: \(request)
+                        Proposed: \(proposed.joined(separator: ", "))
+                        Installed applications:
+                        \(installed)
+                        """,
+                ],
+            ],
+            "tools": Self.evaluatorToolSchemas,
+            "tool_choice": "required",
+        ]
+    }
+
     // Computed, not a stored `static let`: `[[String: Any]]` is not `Sendable`,
     // and Swift 6 strict concurrency rejects a stored global of a non-Sendable
     // type as possible shared mutable state. A computed property rebuilds the
@@ -347,6 +430,29 @@ public struct MLXBrainClient:
         ]
     }
 
+    private static var evaluatorToolSchemas: [[String: Any]] {
+        [
+            functionSchema(
+                name: "score_proposal",
+                description: "Score proposal confidence and suggest display-only installed alternatives.",
+                properties: [
+                    "score": [
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                    ],
+                    "alternatives": [
+                        "type": "array",
+                        "items": ["type": "string"],
+                        "maxItems": 2,
+                    ],
+                ],
+                required: ["score", "alternatives"],
+                additionalProperties: false
+            )
+        ]
+    }
+
     private static func routeFunctionSchema(
         name: String,
         description: String
@@ -370,18 +476,23 @@ public struct MLXBrainClient:
         name: String,
         description: String,
         properties: [String: Any],
-        required: [String]
+        required: [String],
+        additionalProperties: Bool? = nil
     ) -> [String: Any] {
-        [
+        var parameters: [String: Any] = [
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        ]
+        if let additionalProperties {
+            parameters["additionalProperties"] = additionalProperties
+        }
+        return [
             "type": "function",
             "function": [
                 "name": name,
                 "description": description,
-                "parameters": [
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                ],
+                "parameters": parameters,
             ],
         ]
     }
@@ -449,5 +560,59 @@ public struct MLXBrainClient:
             throw LocalBrainError.badResponse("unsafe chat response")
         }
         return answer
+    }
+
+    private static func proposalConfidence(
+        in data: Data,
+        proposals: [BrainProposal],
+        inventory: [InstalledApplicationUsage]
+    ) throws -> BrainProposalConfidence {
+        let calls = try toolCalls(in: data)
+        guard calls.count == 1, let call = calls.first,
+            call.toolName == "score_proposal",
+            let argumentsData = call.argumentsJSON.data(using: .utf8),
+            let arguments = try? JSONSerialization.jsonObject(
+                with: argumentsData
+            ) as? [String: Any],
+            Set(arguments.keys) == Set(["score", "alternatives"]),
+            let scoreNumber = arguments["score"] as? NSNumber,
+            CFGetTypeID(scoreNumber) != CFBooleanGetTypeID(),
+            let alternatives = arguments["alternatives"] as? [String]
+        else {
+            throw LocalBrainError.badResponse(
+                "invalid proposal confidence"
+            )
+        }
+
+        let score = scoreNumber.doubleValue
+        let installedNames = Set(inventory.map(\.displayName))
+        let proposedNames = Set(proposals.compactMap(applicationName(in:)))
+        guard score.isFinite, (0...1).contains(score),
+            alternatives.count <= 2,
+            Set(alternatives).count == alternatives.count,
+            alternatives.allSatisfy({
+                installedNames.contains($0) && !proposedNames.contains($0)
+            })
+        else {
+            throw LocalBrainError.badResponse(
+                "invalid proposal confidence"
+            )
+        }
+        return BrainProposalConfidence(
+            score: score,
+            alternatives: alternatives
+        )
+    }
+
+    private static func applicationName(
+        in proposal: BrainProposal
+    ) -> String? {
+        switch proposal {
+        case let .openApplication(name, _),
+            let .switchToApplication(name, _):
+            name
+        case .noSupportedAction:
+            nil
+        }
     }
 }

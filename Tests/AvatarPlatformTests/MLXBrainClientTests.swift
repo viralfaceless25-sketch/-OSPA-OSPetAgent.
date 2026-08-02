@@ -491,4 +491,93 @@ struct MLXBrainClientTests {
         }
         #expect((object["temperature"] as? Double) == 0)
     }
+
+    @Test("The evaluator returns one bounded score with grounded alternatives")
+    func parsesProposalConfidence() async throws {
+        let transport = CapturingTransport(
+            response: toolCallResponse(
+                name: "score_proposal",
+                arguments:
+                    #"{\"score\":0.42,\"alternatives\":[\"Music\"]}"#
+            )
+        )
+        let client: any LocalBrainProposalEvaluating = MLXBrainClient(
+            transport: transport
+        )
+        let expandedInventory = inventory + [
+            InstalledApplicationUsage(
+                displayName: "Music", openCount: 8, lastUsedDaysAgo: 1
+            )
+        ]
+
+        let confidence = try await client.evaluate(
+            request: "play music",
+            proposals: [
+                .openApplication(name: "Spotify", reason: "You use it for music.")
+            ],
+            inventory: expandedInventory
+        )
+
+        #expect(confidence == BrainProposalConfidence(score: 0.42, alternatives: ["Music"]))
+        let body = try #require(transport.sentBody)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        let tools = try #require(object["tools"] as? [[String: Any]])
+        let function = try #require(tools.first?["function"] as? [String: Any])
+        #expect(tools.count == 1)
+        #expect(function["name"] as? String == "score_proposal")
+        #expect(object["tool_choice"] as? String == "required")
+        let text = try #require(String(data: body, encoding: .utf8))
+        #expect(text.contains("play music"))
+        #expect(text.contains("Spotify"))
+        #expect(text.contains("Music"))
+        #expect(!text.contains("open_application"))
+        #expect(!text.contains("switch_to_application"))
+    }
+
+    @Test("Malformed or authority-expanding evaluator output is refused")
+    func rejectsInvalidProposalConfidence() async {
+        let proposal = BrainProposal.openApplication(
+            name: "Spotify",
+            reason: "You use it for music."
+        )
+        let expandedInventory = inventory + [
+            InstalledApplicationUsage(
+                displayName: "Music", openCount: 8, lastUsedDaysAgo: 1
+            )
+        ]
+        let responses = [
+            Data(#"{"choices":[{"message":{"role":"assistant","content":"0.9"}}]}"#.utf8),
+            toolCallResponse(
+                calls: [
+                    ("score_proposal", #"{\"score\":0.8,\"alternatives\":[]}"#),
+                    ("score_proposal", #"{\"score\":0.9,\"alternatives\":[]}"#),
+                ]
+            ),
+            toolCallResponse(name: "open_application", arguments: #"{\"score\":0.8,\"alternatives\":[]}"#),
+            toolCallResponse(name: "score_proposal", arguments: #"{\"alternatives\":[]}"#),
+            toolCallResponse(name: "score_proposal", arguments: #"{\"score\":\"high\",\"alternatives\":[]}"#),
+            toolCallResponse(name: "score_proposal", arguments: #"{\"score\":-0.1,\"alternatives\":[]}"#),
+            toolCallResponse(name: "score_proposal", arguments: #"{\"score\":1.1,\"alternatives\":[]}"#),
+            toolCallResponse(name: "score_proposal", arguments: #"{\"score\":0.5,\"alternatives\":[\"Music\",\"Spotify\",\"Other\"]}"#),
+            toolCallResponse(name: "score_proposal", arguments: #"{\"score\":0.5,\"alternatives\":[\"Uninstalled\"]}"#),
+            toolCallResponse(name: "score_proposal", arguments: #"{\"score\":0.5,\"alternatives\":[\"Spotify\"]}"#),
+            toolCallResponse(name: "score_proposal", arguments: #"{\"score\":0.5,\"alternatives\":[\"Music\",\"Music\"]}"#),
+            toolCallResponse(name: "score_proposal", arguments: #"{\"score\":0.5,\"alternatives\":[],\"action\":\"open Music\"}"#),
+        ]
+
+        for response in responses {
+            let client = MLXBrainClient(
+                transport: StubTransport(body: response)
+            )
+            await #expect(throws: (any Error).self) {
+                try await client.evaluate(
+                    request: "play music",
+                    proposals: [proposal],
+                    inventory: expandedInventory
+                )
+            }
+        }
+    }
 }

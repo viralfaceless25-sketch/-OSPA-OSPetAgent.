@@ -26,6 +26,11 @@ final class AvatarModel: ObservableObject {
         let reason: String?
     }
 
+    private struct EvaluatedBrainProposals {
+        let proposals: [BrainProposal]
+        let confidence: BrainProposalConfidence?
+    }
+
     @Published var isExpanded = false
     @Published var command = ""
     @Published var previewedAction: AvatarAction?
@@ -140,6 +145,7 @@ final class AvatarModel: ObservableObject {
     private let brainService: any LocalBrainService
     private let brainIntentRouter: any LocalBrainIntentRouting
     private let brainChatService: any LocalBrainChatService
+    private let brainProposalEvaluator: any LocalBrainProposalEvaluating
     private let brainCorrectionStore: any BrainCorrectionStoring
     /// Monotonic token identifying the newest brain request. A handler whose
     /// task slipped past its cancellation guard into the MainActor hop must not
@@ -167,6 +173,7 @@ final class AvatarModel: ObservableObject {
         brainService: any LocalBrainService = MLXBrainClient(),
         brainIntentRouter: any LocalBrainIntentRouting = MLXBrainClient(),
         brainChatService: any LocalBrainChatService = MLXBrainClient(),
+        brainProposalEvaluator: (any LocalBrainProposalEvaluating)? = nil,
         brainServerController: LocalBrainServerController? = nil,
         brainCorrectionStore: any BrainCorrectionStoring = BrainCorrectionStore(),
         brainIdleShutdownInterval: TimeInterval = 300,
@@ -178,6 +185,10 @@ final class AvatarModel: ObservableObject {
         self.brainService = brainService
         self.brainIntentRouter = brainIntentRouter
         self.brainChatService = brainChatService
+        self.brainProposalEvaluator =
+            brainProposalEvaluator
+            ?? (brainService as? any LocalBrainProposalEvaluating)
+            ?? MLXBrainClient()
         self.brainCorrectionStore = brainCorrectionStore
         self.brainServerController =
             brainServerController ?? Self.makeLiveBrainServerController()
@@ -1634,12 +1645,13 @@ final class AvatarModel: ObservableObject {
         let installedNames = Set(inventory.map(\.displayName))
         let service = brainService
         let validator = brainValidator
+        let evaluator = brainProposalEvaluator
         let serverController = brainServerController
         let correctionStore = brainCorrectionStore
         let pendingCorrectionWrite = brainCorrectionWriteTask
 
         brainTask = Task { [weak self] in
-            let outcome: Result<[BrainProposal], any Error>
+            let outcome: Result<EvaluatedBrainProposals, any Error>
             do {
                 guard await serverController.ensureReady() == .ready else {
                     throw LocalBrainError.unavailable
@@ -1657,10 +1669,28 @@ final class AvatarModel: ObservableObject {
                         corrections: corrections
                     )
                 }
+                let proposals = try validator.validate(
+                    raw,
+                    installedApplicationNames: installedNames
+                )
+                let confidence: BrainProposalConfidence?
+                if proposals.count == 1,
+                    proposals.first?.parsedApplicationCommand == nil
+                {
+                    confidence = nil
+                } else {
+                    confidence = try await serverController.withTrackedRequest {
+                        try await evaluator.evaluate(
+                            request: request,
+                            proposals: proposals,
+                            inventory: inventory
+                        )
+                    }
+                }
                 outcome = .success(
-                    try validator.validate(
-                        raw,
-                        installedApplicationNames: installedNames
+                    EvaluatedBrainProposals(
+                        proposals: proposals,
+                        confidence: confidence
                     )
                 )
             } catch {
@@ -1682,7 +1712,7 @@ final class AvatarModel: ObservableObject {
     }
 
     private func finishBrainProposal(
-        _ outcome: Result<[BrainProposal], any Error>,
+        _ outcome: Result<EvaluatedBrainProposals, any Error>,
         request: String,
         generation: Int
     ) {
@@ -1704,7 +1734,17 @@ final class AvatarModel: ObservableObject {
         guard isBrainEnabled else { return }
 
         switch outcome {
-        case let .success(proposals):
+        case let .success(evaluated):
+            if let confidence = evaluated.confidence,
+                confidence.score < Self.brainProposalConfidenceThreshold
+            {
+                brainStatus = Self.disambiguationMessage(
+                    proposals: evaluated.proposals,
+                    alternatives: confidence.alternatives
+                )
+                return
+            }
+            let proposals = evaluated.proposals
             guard let proposal = proposals.first else {
                 brainStatus = Self.brainMessage(
                     for: BrainProposalError.noToolCalls
@@ -1890,6 +1930,36 @@ final class AvatarModel: ObservableObject {
             self.status = "That request expired. Ask again."
             self.taskSequenceStatus = "That request expired. Ask again."
         }
+    }
+
+    /// UX tuning only. It never grants authority or skips validation, preview,
+    /// consent, expiry, Emergency Stop, or execution checks.
+    private static let brainProposalConfidenceThreshold = 0.65
+
+    private static func disambiguationMessage(
+        proposals: [BrainProposal],
+        alternatives: [String]
+    ) -> String {
+        guard !alternatives.isEmpty,
+            proposals.count == 1,
+            let proposedName = proposals.first.flatMap({ proposal in
+                switch proposal {
+                case let .openApplication(name, _),
+                    let .switchToApplication(name, _):
+                    name
+                case .noSupportedAction:
+                    nil
+                }
+            })
+        else {
+            return "I’m not sure which app you mean. Please name it."
+        }
+
+        let candidates = [proposedName] + alternatives
+        if candidates.count == 2 {
+            return "Did you mean \(candidates[0]) or \(candidates[1])? Please say which app."
+        }
+        return "Did you mean \(candidates[0]), \(candidates[1]), or \(candidates[2])? Please say which app."
     }
 
     /// Plain language only. These strings are read by someone who does not know
