@@ -60,7 +60,7 @@ enum ApprovedHostRedirectPolicy {
     }
 }
 
-private final class ApprovedHostRedirectDelegate:
+final class ApprovedHostRedirectDelegate:
     NSObject, URLSessionTaskDelegate, @unchecked Sendable
 {
     private let approvedHosts: Set<String>
@@ -106,6 +106,18 @@ private final class ApprovedHostRedirectDelegate:
     }
 }
 
+struct BoundedResponseBuffer {
+    let limit: Int
+    private(set) var data = Data()
+
+    mutating func append(_ byte: UInt8) throws {
+        guard data.count < limit else {
+            throw DocumentFetchError.responseTooLarge
+        }
+        data.append(byte)
+    }
+}
+
 /// The only outbound-network code in this project.
 public struct URLSessionPageTransport: PageTransport {
     public init() {}
@@ -132,12 +144,12 @@ public struct URLSessionPageTransport: PageTransport {
         let delegate = ApprovedHostRedirectDelegate(
             approvedHosts: approvedHosts
         )
-        defer { session.finishTasksAndInvalidate() }
+        defer { session.invalidateAndCancel() }
 
-        let data: Data
+        let bytes: URLSession.AsyncBytes
         let response: URLResponse
         do {
-            (data, response) = try await session.data(
+            (bytes, response) = try await session.bytes(
                 for: request,
                 delegate: delegate
             )
@@ -156,10 +168,26 @@ public struct URLSessionPageTransport: PageTransport {
         guard (200..<300).contains(http.statusCode) else {
             throw DocumentFetchError.httpStatus(http.statusCode)
         }
+        if http.expectedContentLength > FetchLimits.maximumResponseBytes {
+            bytes.task.cancel()
+            throw DocumentFetchError.responseTooLarge
+        }
+
+        var buffer = BoundedResponseBuffer(
+            limit: FetchLimits.maximumResponseBytes
+        )
+        do {
+            for try await byte in bytes {
+                try buffer.append(byte)
+            }
+        } catch DocumentFetchError.responseTooLarge {
+            bytes.task.cancel()
+            throw DocumentFetchError.responseTooLarge
+        }
         return FetchedPageResponse(
             finalURL: http.url ?? url,
             contentType: http.value(forHTTPHeaderField: "Content-Type"),
-            body: data
+            body: buffer.data
         )
     }
 }
@@ -192,6 +220,9 @@ public struct DocumentFetcher: DocumentFetching {
     ) async throws -> FetchedDocument {
         // Existing, already-reviewed boundary: HTTPS, approved host, expiry.
         try gate.validateFetch(url, authorization: authorization, now: now)
+        guard url.user == nil, url.password == nil else {
+            throw ResearchBoundaryError.credentialsNotAllowed
+        }
 
         let response: FetchedPageResponse
         do {
@@ -230,14 +261,14 @@ public struct DocumentFetcher: DocumentFetching {
         let document: FetchedDocument?
         if Self.mediaType(response.contentType) == "text/plain" {
             document = FetchedDocument(
-                sourceURL: url,
+                sourceURL: response.finalURL,
                 text: text,
                 responseByteCount: response.body.count
             )
         } else {
             document = extractor.extract(
                 html: text,
-                sourceURL: url,
+                sourceURL: response.finalURL,
                 responseByteCount: response.body.count
             )
         }

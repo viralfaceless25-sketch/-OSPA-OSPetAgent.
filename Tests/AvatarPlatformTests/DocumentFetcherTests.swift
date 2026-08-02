@@ -41,6 +41,22 @@ private struct StubTransport: PageTransport {
     }
 }
 
+private final class RedirectCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedRequest: URLRequest?
+    private var storedCalled = false
+
+    var request: URLRequest? { lock.withLock { storedRequest } }
+    var wasCalled: Bool { lock.withLock { storedCalled } }
+
+    func complete(_ request: URLRequest?) {
+        lock.withLock {
+            storedRequest = request
+            storedCalled = true
+        }
+    }
+}
+
 private func authorization(
     hosts: Set<String> = ["example.com"],
     expiresAt: Date = Date(timeIntervalSince1970: 2_000_000)
@@ -107,6 +123,69 @@ struct ApprovedHostRedirectPolicyTests {
             ) == .refuse(host: "example.com")
         )
     }
+
+    @Test(
+        "The URLSession delegate applies the redirect decision offline",
+        arguments: [
+            (
+                "https://example.com/moved",
+                true,
+                nil as String?
+            ),
+            (
+                "https://evil.example.net/page",
+                false,
+                "evil.example.net" as String?
+            ),
+            (
+                "http://example.com/page",
+                false,
+                "example.com" as String?
+            ),
+        ]
+    )
+    func delegateAppliesPolicy(
+        destination: String,
+        shouldFollow: Bool,
+        refusedHost: String?
+    ) {
+        let original = URL(string: "https://example.com/page")!
+        let delegate = ApprovedHostRedirectDelegate(
+            approvedHosts: ["example.com"]
+        )
+        let task = URLSession.shared.dataTask(with: original)
+        defer { task.cancel() }
+        let completion = RedirectCompletion()
+        delegate.urlSession(
+            URLSession.shared,
+            task: task,
+            willPerformHTTPRedirection: HTTPURLResponse(
+                url: original,
+                statusCode: 302,
+                httpVersion: nil,
+                headerFields: nil
+            )!,
+            newRequest: URLRequest(url: URL(string: destination)!),
+            completionHandler: completion.complete
+        )
+        #expect(completion.wasCalled)
+        #expect((completion.request != nil) == shouldFollow)
+        #expect(delegate.refusedHost == refusedHost)
+    }
+}
+
+@Suite("Bounded response buffer")
+struct BoundedResponseBufferTests {
+    @Test("The byte after the cap is refused without being stored")
+    func refusesBytePastCap() throws {
+        var buffer = BoundedResponseBuffer(limit: 2)
+        try buffer.append(0x01)
+        try buffer.append(0x02)
+        #expect(throws: DocumentFetchError.responseTooLarge) {
+            try buffer.append(0x03)
+        }
+        #expect(buffer.data == Data([0x01, 0x02]))
+    }
 }
 
 @Suite("Document fetcher")
@@ -115,12 +194,12 @@ struct DocumentFetcherTests {
 
     @Test("An approved page becomes extracted text with exact byte metadata")
     func fetchesApprovedPage() async throws {
-        let html = "<p>Hello from the page.</p>"
+        let html = "<p>Hello from 東京.</p>"
         let transport = StubTransport(response: htmlResponse(html))
         let document = try await DocumentFetcher(transport: transport).fetch(
             url: approvedURL, authorization: authorization(), now: now
         )
-        #expect(document.text == "Hello from the page.")
+        #expect(document.text == "Hello from 東京.")
         #expect(document.sourceURL == approvedURL)
         #expect(document.responseByteCount == Data(html.utf8).count)
         #expect(transport.calls.approvedHosts == ["example.com"])
@@ -158,6 +237,7 @@ struct DocumentFetcherTests {
             url: approvedURL, authorization: authorization(), now: now
         )
         #expect(document.text == "Moved.")
+        #expect(document.sourceURL == URL(string: "https://example.com/moved")!)
     }
 
     @Test("An oversize response is refused before extraction")
@@ -251,6 +331,20 @@ struct DocumentFetcherTests {
         #expect(transport.calls.value == 0)
     }
 
+    @Test("Credentials in the initial URL are refused without contacting anything")
+    func refusesCredentialBearingURL() async {
+        let transport = StubTransport(response: htmlResponse("<p>x</p>"))
+        let fetcher = DocumentFetcher(transport: transport)
+        await #expect(throws: ResearchBoundaryError.credentialsNotAllowed) {
+            try await fetcher.fetch(
+                url: URL(string: "https://user:secret@example.com/page")!,
+                authorization: authorization(),
+                now: now
+            )
+        }
+        #expect(transport.calls.value == 0)
+    }
+
     @Test("An expired authorization is refused without contacting anything")
     func refusesExpiredAuthorization() async {
         let transport = StubTransport(response: htmlResponse("<p>x</p>"))
@@ -282,6 +376,22 @@ struct DocumentFetcherTests {
     func mapsTimeout() async {
         let transport = StubTransport(error: URLError(.timedOut))
         await #expect(throws: DocumentFetchError.timedOut) {
+            try await DocumentFetcher(transport: transport).fetch(
+                url: approvedURL, authorization: authorization(), now: now
+            )
+        }
+    }
+
+    @Test("Invalid UTF-8 is refused as unreadable text")
+    func refusesInvalidUTF8() async {
+        let transport = StubTransport(
+            response: FetchedPageResponse(
+                finalURL: approvedURL,
+                contentType: "text/plain",
+                body: Data([0xC3, 0x28])
+            )
+        )
+        await #expect(throws: DocumentFetchError.notReadableText) {
             try await DocumentFetcher(transport: transport).fetch(
                 url: approvedURL, authorization: authorization(), now: now
             )
