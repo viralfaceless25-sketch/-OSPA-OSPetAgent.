@@ -373,6 +373,70 @@ struct AvatarModelBrainTests {
         #expect(model.previewedAction == nil)
     }
 
+    /// The chat client is untrusted exactly like the proposal client, so the
+    /// display bound has to hold at the publication point too — not only inside
+    /// the transport that a swapped or injected service bypasses entirely.
+    @Test(
+        "Unsafe chat text is refused at the model layer, not just in transport",
+        arguments: [
+            String(repeating: "a", count: 2_001),
+            "Answer with a bidi override \u{202E} in it.",
+            "Answer with a null \u{0000} in it.",
+            "Answer split\u{2028}across separators.",
+        ]
+    )
+    func unsafeChatTextNeverPublishes(unsafe: String) async {
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: RecordingBrainService(.failure(.unavailable)),
+            brainIntentRouter: RecordingIntentRouter(.lane(.chat)),
+            brainChatService: FixedChatService(response: unsafe),
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "tell me something"
+
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        #expect(model.brainStatus != unsafe)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.previewedAction == nil)
+    }
+
+    /// A cancelled request must still arm the idle timer. Emergency Stop and the
+    /// brain toggle shut the server down explicitly, but replacing a pending
+    /// request by picking a search result does neither — without this the
+    /// multi-gigabyte model server stays resident until the app quits.
+    @Test("A request cancelled by a search selection still releases the server")
+    func cancelledRoutingStillArmsIdleShutdown() async throws {
+        let router = ControlledIntentRouter()
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: RecordingBrainService(.failure(.unavailable)),
+            brainIntentRouter: router,
+            brainServerController: readyServerController(),
+            brainIdleShutdownInterval: 0
+        )
+        model.isBrainEnabled = true
+        model.command = "what's the weather in Tokyo"
+
+        model.previewCommand()
+        for _ in 0..<200 {
+            if await router.hasStarted() { break }
+            await Task.yield()
+        }
+        #expect(await router.hasStarted())
+
+        model.emergencyStop()
+        await router.finishAfterCancellation(returning: .nativeApp)
+        for _ in 0..<50 { await Task.yield() }
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.brainStatus == "Emergency stop active. Thinking cancelled.")
+    }
+
     @Test("The native app lane still refuses an invalid model tool")
     func nativeLaneStillUsesProposalValidator() async {
         let service = RecordingBrainService(

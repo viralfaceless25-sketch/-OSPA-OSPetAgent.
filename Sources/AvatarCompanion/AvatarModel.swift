@@ -132,6 +132,12 @@ final class AvatarModel: ObservableObject {
     private let brainService: any LocalBrainService
     private let brainIntentRouter: any LocalBrainIntentRouting
     private let brainChatService: any LocalBrainChatService
+    /// Monotonic token identifying the newest brain request. A handler whose
+    /// task slipped past its cancellation guard into the MainActor hop must not
+    /// clear `brainTask` or publish, because doing so would orphan the request
+    /// that superseded it — placing it beyond the reach of Emergency Stop and
+    /// the brain toggle — and show the stale answer.
+    private var brainGeneration = 0
     private let brainServerController: LocalBrainServerController
     private let brainIdleShutdownInterval: TimeInterval
     private let frontmostBundleIdentifier: @MainActor @Sendable () -> String?
@@ -1395,6 +1401,8 @@ final class AvatarModel: ObservableObject {
         isBrainThinking = true
         brainStatus = "Thinking…"
 
+        brainGeneration += 1
+        let generation = brainGeneration
         let router = brainIntentRouter
         let serverController = brainServerController
 
@@ -1412,17 +1420,28 @@ final class AvatarModel: ObservableObject {
                 outcome = .failure(error)
             }
 
+            // Arm the idle timer BEFORE the cancellation guard, matching
+            // startBrainProposal. A cancelled task must still release the
+            // resident model server; otherwise a request cancelled by, say,
+            // picking a search result leaves several gigabytes resident until
+            // the app quits.
+            await MainActor.run {
+                self?.scheduleBrainIdleShutdown()
+            }
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                self?.finishBrainRouting(outcome, for: request)
+                self?.finishBrainRouting(outcome, for: request, generation: generation)
             }
         }
     }
 
     private func finishBrainRouting(
         _ outcome: Result<LocalBrainIntentLane, any Error>,
-        for request: String
+        for request: String,
+        generation: Int
     ) {
+        // Superseded by a newer request while suspended: touch nothing.
+        guard generation == brainGeneration else { return }
         brainTask = nil
 
         // A late result must never publish after the user turned the brain off
@@ -1464,6 +1483,8 @@ final class AvatarModel: ObservableObject {
         isBrainThinking = true
         brainStatus = "Thinking…"
 
+        brainGeneration += 1
+        let generation = brainGeneration
         let chatService = brainChatService
         let serverController = brainServerController
 
@@ -1481,14 +1502,23 @@ final class AvatarModel: ObservableObject {
                 outcome = .failure(error)
             }
 
+            // Same ordering rule as the routing and proposal tasks: release the
+            // server even when this result is discarded.
+            await MainActor.run {
+                self?.scheduleBrainIdleShutdown()
+            }
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                self?.finishBrainChat(outcome)
+                self?.finishBrainChat(outcome, generation: generation)
             }
         }
     }
 
-    private func finishBrainChat(_ outcome: Result<String, any Error>) {
+    private func finishBrainChat(
+        _ outcome: Result<String, any Error>,
+        generation: Int
+    ) {
+        guard generation == brainGeneration else { return }
         brainTask = nil
         isBrainThinking = false
 
@@ -1502,7 +1532,14 @@ final class AvatarModel: ObservableObject {
             applicationProposalExpiresAt = nil
             pendingTaskSequence = nil
             clearBrainOriginatedProposal()
-            brainStatus = answer
+            // Re-check the display bound here, not only in the transport. The
+            // client is untrusted by design, exactly like the proposal path,
+            // so an injected or swapped LocalBrainChatService must not be able
+            // to put unbounded or control-bearing text on a consent-adjacent
+            // surface.
+            brainStatus =
+                BrainChatAnswer.sanitized(answer)
+                ?? Self.brainMessage(for: LocalBrainError.badResponse("unsafe chat response"))
         case let .failure(error):
             brainStatus = Self.brainMessage(for: error)
         }
@@ -1565,6 +1602,10 @@ final class AvatarModel: ObservableObject {
             brainStatus = "Emergency stop is active."
             return
         }
+        // Match the routing and chat handlers: a result arriving after the user
+        // switched natural language off must not repopulate previews that
+        // cancelBrainProposal() just cleared.
+        guard isBrainEnabled else { return }
 
         switch outcome {
         case let .success(proposals):

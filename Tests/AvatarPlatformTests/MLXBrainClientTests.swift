@@ -187,7 +187,7 @@ struct MLXBrainClientTests {
         )
         await #expect(
             throws: LocalBrainError.badResponse(
-                "intent route arguments must be empty"
+                "intent route must not carry arguments"
             )
         ) {
             try await argumentBearing.route(request: "weather")
@@ -200,11 +200,27 @@ struct MLXBrainClientTests {
         )
         await #expect(
             throws: LocalBrainError.badResponse(
-                "intent route arguments must be empty"
+                "intent route must not carry arguments"
             )
         ) {
             try await malformed.route(request: "hello")
         }
+    }
+
+    /// Servers and models commonly omit `arguments`, or send `""`, for a
+    /// zero-parameter function. Rejecting that would fail closed on every real
+    /// request, so absent arguments must be accepted as equivalent to `{}`.
+    @Test(
+        "A zero-argument route is accepted however the server spells it",
+        arguments: ["", "   ", "{}"]
+    )
+    func acceptsAbsentIntentRouteArguments(arguments: String) async throws {
+        let client = MLXBrainClient(
+            transport: StubTransport(
+                body: toolCallResponse(name: "chat", arguments: arguments)
+            )
+        )
+        #expect(try await client.route(request: "explain photosynthesis") == .chat)
     }
 
     @Test("Offline chat returns one trimmed safe paragraph")

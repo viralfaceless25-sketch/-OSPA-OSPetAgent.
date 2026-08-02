@@ -100,15 +100,24 @@ public struct MLXBrainClient:
                 "expected exactly one intent route"
             )
         }
-        guard
-            let data = call.argumentsJSON.data(using: .utf8),
-            let arguments = try? JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-            arguments.isEmpty
-        else {
-            throw LocalBrainError.badResponse(
-                "intent route arguments must be empty"
-            )
+        // Servers and models routinely omit `arguments` entirely, or send "",
+        // for a zero-parameter function. Treat absent as equivalent to {} —
+        // rejecting it would fail closed on every single request against a
+        // real server, which reads as the whole feature being broken.
+        let rawArguments = call.argumentsJSON.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        if !rawArguments.isEmpty {
+            guard
+                let data = rawArguments.data(using: .utf8),
+                let arguments = try? JSONSerialization.jsonObject(with: data)
+                    as? [String: Any],
+                arguments.isEmpty
+            else {
+                throw LocalBrainError.badResponse(
+                    "intent route must not carry arguments"
+                )
+            }
         }
         guard let lane = LocalBrainIntentLane(rawValue: call.toolName) else {
             throw LocalBrainError.badResponse("unknown intent route")
@@ -390,18 +399,9 @@ public struct MLXBrainClient:
             )
         }
 
-        let answer = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        let scalars = answer.unicodeScalars
-        guard (1...2_000).contains(scalars.count),
-            !scalars.contains(where: {
-                switch $0.properties.generalCategory {
-                case .control, .format:
-                    true
-                default:
-                    false
-                }
-            })
-        else {
+        // One implementation of the bound, owned by the pure layer, so the
+        // transport check and the publication check cannot drift apart.
+        guard let answer = BrainChatAnswer.sanitized(content) else {
             throw LocalBrainError.badResponse("unsafe chat response")
         }
         return answer

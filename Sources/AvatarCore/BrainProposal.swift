@@ -281,3 +281,41 @@ public struct BrainProposalValidator: Sendable {
             .precomposedStringWithCanonicalMapping
     }
 }
+
+/// Display-safety bound for offline chat text.
+///
+/// Chat answers never become an action, but they are shown on the same surface
+/// the user reads while deciding whether to authorize one. The model client is
+/// untrusted by design, so this bound lives here in the pure layer and is
+/// applied at the publication point as well as in the transport — the same
+/// arrangement that keeps `BrainProposalValidator`, not `MLXBrainClient`, the
+/// authority over proposals.
+public enum BrainChatAnswer: Sendable {
+    /// Generous next to `maximumReasonLength` (200), because a chat answer is
+    /// the whole response rather than a one-line justification, but still
+    /// bounded so it cannot flood the surface.
+    public static let maximumScalarCount = 2_000
+
+    /// Returns the trimmed answer, or `nil` when it is empty, over-long, or
+    /// carries control, format, or line/paragraph separators. Rejects rather
+    /// than truncates, so a caller can never publish a silently altered answer.
+    public static func sanitized(_ answer: String) -> String? {
+        let trimmed = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scalars = trimmed.unicodeScalars
+        guard (1...maximumScalarCount).contains(scalars.count) else {
+            return nil
+        }
+        let hasUnsafeScalar = scalars.contains { scalar in
+            switch scalar.properties.generalCategory {
+            // Cc/Cf cover control and format characters, including zero-width
+            // and bidi overrides. Zl/Zp are neither, but they render as line
+            // breaks, and this surface expects one paragraph.
+            case .control, .format, .lineSeparator, .paragraphSeparator:
+                true
+            default:
+                false
+            }
+        }
+        return hasUnsafeScalar ? nil : trimmed
+    }
+}
