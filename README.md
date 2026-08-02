@@ -18,6 +18,7 @@ native opening plus explicit, read-only Accessibility evidence collection.
 - Pure policy layer with Swift Testing coverage
 - Foreground app identification using app name and bundle ID only
 - User-reviewed official-documentation research scope
+- One user-requested page read from an explicitly approved HTTPS host
 - Untrusted research artifact and reviewed-claim boundary
 - Generic capability profiles and foreground computer-use adapter contract
 - App-targeted, expiring, one-shot consent and action plans
@@ -40,8 +41,10 @@ native opening plus explicit, read-only Accessibility evidence collection.
 - Confirmed real execution of typed visible steps through Accessibility actions
   and one bounded keyboard chord
 
-No credentials, screen capture, file-content reads, network fetch, shell,
-AppleScript, or global keyboard monitoring are used. Accessibility inspection
+No credentials, screen capture, file-content reads, shell, AppleScript, or global
+keyboard monitoring are used. The only outside-network path reads one URL supplied
+by the user from a live, explicitly approved HTTPS host; it sends no model-selected
+URL and cannot produce an action. Accessibility inspection
 reads only a bounded allowlist of interactive metadata after two explicit user
 steps; unknown labels are discarded before snapshot storage. Search reads only
 local name/path/type metadata from user-approved scopes. Accessibility is checked
@@ -93,8 +96,21 @@ identity, hardened runtime, notarization, and a unique bundle identifier.
 4. Select **Prepare research scope**.
 5. Review exact host, five-document cap, 15-minute expiry, and trust warning.
 6. Select **Approve this research scope**.
+7. Enter a question about the same user-supplied URL.
+8. Select **Read approved page**.
 
-Approval is demonstrable state only. No page is fetched in this milestone.
+## Read one approved page
+
+The URL is always yours: the model never chooses a host or follows a link. OSPA
+reads only while the exact host has a live 15-minute authorization. Same-host HTTPS
+redirects may proceed; every other redirect is refused before connection. Responses
+over 2 MiB, extracted text over 20,000 characters, non-text content, and invalid
+UTF-8 are refused.
+
+Fetched text is untrusted and stays in memory only long enough to answer your
+question. Reading never offers, previews, or performs an action. Redacted in-memory
+audit metadata contains request ID, host, outcome, byte count, and timestamp—never
+the URL path or page content.
 
 ## Try computer-use planning
 
@@ -134,8 +150,11 @@ deferred, non-executable goal.
 
 ## Talk to it normally
 
-Natural language is off until you turn it on. Nothing is sent anywhere: the
-model runs on this Mac. OSPA lazily starts the configured MLX runtime at
+Natural language is off until you turn it on. Prompts, installed-app inventory,
+confidence evaluation, and learned corrections stay on this Mac. The separate,
+explicit **Read approved page** flow sends an HTTP request only to the user-supplied,
+authorized URL and feeds the returned text to the same local model. OSPA lazily
+starts the configured MLX runtime at
 `~/Models/.venv/bin/python`, or safely adopts a compatible server already running
 on `127.0.0.1:8081` without taking ownership of it.
 

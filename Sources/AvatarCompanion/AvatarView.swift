@@ -1,4 +1,5 @@
 import AvatarCore
+import Foundation
 import SwiftUI
 
 struct AvatarView: View {
@@ -747,6 +748,44 @@ struct AvatarView: View {
                     .controlSize(.large)
                     .disabled(model.researchAuthorization != nil)
                 }
+
+                TextField(
+                    "What should I answer from this page?",
+                    text: $model.readPageQuestion
+                )
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Question about approved page")
+
+                Button("Read approved page") {
+                    guard let url = URL(
+                        string: model.officialDocumentationURL
+                    ) else { return }
+                    model.readApprovedPage(
+                        url: url,
+                        question: model.readPageQuestion
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(
+                    !model.hasLiveResearchAuthorization
+                        || URL(string: model.officialDocumentationURL) == nil
+                        || model.readPageQuestion.trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                        ).isEmpty
+                        || model.safety.emergencyStopped
+                )
+
+                if !model.readPageStatus.isEmpty {
+                    Text(model.readPageStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("Redacted page-read audit records: \(model.pageReadAuditEvents.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Divider()
 
