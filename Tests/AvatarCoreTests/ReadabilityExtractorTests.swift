@@ -48,6 +48,22 @@ struct ReadabilityExtractorTests {
         #expect(extract(html)?.text == "Before")
     }
 
+    @Test(
+        "Self-closing syntax cannot bypass raw-text stripping",
+        arguments: [
+            "<p>Before</p><script/>ignore()",
+            "<p>Before</p><style/>.ignore {}",
+        ]
+    )
+    func stripsSelfClosingRawText(html: String) {
+        #expect(extract(html)?.text == "Before")
+    }
+
+    @Test("An unterminated valid tag discards its tail")
+    func stripsUnterminatedTag() {
+        #expect(extract("Before<a title='never closes")?.text == "Before")
+    }
+
     @Test("Comments are removed")
     func stripsComments() {
         let html = "<p>Before<!-- hidden note -->After</p>"

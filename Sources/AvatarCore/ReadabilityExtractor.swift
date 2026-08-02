@@ -28,7 +28,6 @@ public struct ReadabilityExtractor: Sendable {
         let end: Int
         let name: String?
         let isClosing: Bool
-        let isSelfClosing: Bool
     }
 
     /// Removes tags with a small quote-aware scanner. Script and style bodies
@@ -47,17 +46,23 @@ public struct ReadabilityExtractor: Sendable {
                 continue
             }
 
-            guard characters[index] == "<",
-                let tag = parseTag(at: index, in: characters)
-            else {
+            guard startsTag(at: index, in: characters) else {
                 output.append(characters[index])
                 index += 1
                 continue
             }
 
+            // Once input has a syntactically valid tag start, a missing `>`
+            // makes the rest malformed markup. Discard it in one pass instead
+            // of retrying every later `<`, which could become quadratic.
+            guard let tag = parseTag(at: index, in: characters) else {
+                output.append(" ")
+                break
+            }
+
             output.append(" ")
             index = tag.end + 1
-            guard !tag.isClosing, !tag.isSelfClosing,
+            guard !tag.isClosing,
                 let name = tag.name,
                 name == "script" || name == "style"
             else { continue }
@@ -106,7 +111,6 @@ public struct ReadabilityExtractor: Sendable {
         }
 
         var quote: Character?
-        var lastNonWhitespace: Character?
         while cursor < characters.count {
             let character = characters[cursor]
             if let activeQuote = quote {
@@ -117,14 +121,29 @@ public struct ReadabilityExtractor: Sendable {
                 return Tag(
                     end: cursor,
                     name: name,
-                    isClosing: isClosing,
-                    isSelfClosing: lastNonWhitespace == "/"
+                    isClosing: isClosing
                 )
             }
-            if !character.isWhitespace { lastNonWhitespace = character }
             cursor += 1
         }
         return nil
+    }
+
+    private static func startsTag(
+        at start: Int,
+        in characters: [Character]
+    ) -> Bool {
+        guard start < characters.count, characters[start] == "<" else {
+            return false
+        }
+        var cursor = start + 1
+        guard cursor < characters.count else { return false }
+        if characters[cursor] == "/" {
+            cursor += 1
+            guard cursor < characters.count else { return false }
+        }
+        return characters[cursor] == "!" || characters[cursor] == "?"
+            || isTagNameStart(characters[cursor])
     }
 
     private static func closingTag(
