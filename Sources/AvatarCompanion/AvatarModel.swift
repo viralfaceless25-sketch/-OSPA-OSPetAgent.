@@ -758,6 +758,16 @@ final class AvatarModel: ObservableObject {
                 guard await serverController.ensureReady() == .ready else {
                     throw LocalBrainError.unavailable
                 }
+                guard !Task.isCancelled else { throw CancellationError() }
+                guard await MainActor.run(body: {
+                    self?.isPageReadAuthorizationCurrent(
+                        requestID: authorization.request.id,
+                        approvedAt: authorization.approvedAt,
+                        expiresAt: authorization.expiresAt
+                    ) ?? false
+                }) else {
+                    throw ResearchBoundaryError.authorizationExpired
+                }
                 let prompt = Self.pageReadPrompt(
                     question: trimmedQuestion,
                     document: document

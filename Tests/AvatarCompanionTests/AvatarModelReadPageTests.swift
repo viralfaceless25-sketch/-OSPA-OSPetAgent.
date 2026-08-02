@@ -90,6 +90,25 @@ private actor ControlledReadPageChatService: LocalBrainChatService {
     }
 }
 
+private actor SpyReadPageChatService: LocalBrainChatService {
+    private var count = 0
+
+    func answer(request: String) async throws -> String {
+        count += 1
+        return "Should never run"
+    }
+
+    func callCount() -> Int { count }
+}
+
+private final class ReadPageFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
+}
+
 private func readPageAuthorization(
     duration: TimeInterval = 900,
     maxDocuments: Int = 5
@@ -140,12 +159,14 @@ struct AvatarModelReadPageTests {
 
     private func model(
         fetcher: any DocumentFetching,
-        chat: any LocalBrainChatService = EchoReadPageChatService()
+        chat: any LocalBrainChatService = EchoReadPageChatService(),
+        serverController: LocalBrainServerController? = nil
     ) -> AvatarModel {
         AvatarModel(
             usageSource: ReadPageFixedUsageSource(),
             brainChatService: chat,
-            brainServerController: readPageReadyServerController(),
+            brainServerController:
+                serverController ?? readPageReadyServerController(),
             documentFetcher: fetcher
         )
     }
@@ -347,6 +368,43 @@ struct AvatarModelReadPageTests {
         for _ in 0..<50 { await Task.yield() }
 
         #expect(!model.readPageStatus.contains("Late expired answer"))
+        #expect(model.pageReadAuditEvents.last?.outcome == .denied)
+    }
+
+    @Test("Expiry during server startup never sends page text to the model")
+    func expiryDuringStartupBlocksModelUse() async {
+        let launched = ReadPageFlag()
+        let healthy = ReadPageFlag()
+        let chat = SpyReadPageChatService()
+        let controller = LocalBrainServerController(
+            launch: { launched.set() },
+            terminate: {},
+            isHealthy: { healthy.isSet },
+            now: Date.init,
+            startupTimeout: 1,
+            idleShutdownInterval: 300
+        )
+        let model = model(
+            fetcher: StubDocumentFetcher(text: "Sensitive page text."),
+            chat: chat,
+            serverController: controller
+        )
+        let liveAuthorization = readPageAuthorization(duration: 60)
+        model.researchAuthorization = liveAuthorization
+
+        model.readApprovedPage(url: url, question: "summarize")
+        await waitForReadPage { launched.isSet }
+        model.researchAuthorization = try! ResearchGate().authorize(
+            liveAuthorization.request,
+            userApproved: true,
+            now: liveAuthorization.approvedAt,
+            duration: -1
+        )
+        await waitForReadPage { model.researchAuthorization == nil }
+        healthy.set()
+        try? await Task.sleep(nanoseconds: 800_000_000)
+
+        #expect(await chat.callCount() == 0)
         #expect(model.pageReadAuditEvents.last?.outcome == .denied)
     }
 }
