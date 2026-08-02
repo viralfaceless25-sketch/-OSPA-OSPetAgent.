@@ -27,10 +27,14 @@ public enum FetchLimits: Sendable {
         guard let rawValue else { return false }
         let mediaType =
             rawValue
-            .split(separator: ";", maxSplits: 1)
+            .split(
+                separator: ";",
+                maxSplits: 1,
+                omittingEmptySubsequences: false
+            )
             .first
             .map(String.init)?
-            .trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         guard let mediaType else { return false }
         return allowedContentTypes.contains(mediaType)
@@ -52,18 +56,17 @@ public struct FetchedDocument: Equatable, Sendable {
     public init?(
         sourceURL: URL,
         text: String,
-        responseByteCount: Int? = nil
+        responseByteCount: Int
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let byteCount = responseByteCount ?? text.utf8.count
         guard !trimmed.isEmpty,
             trimmed.count <= FetchLimits.maximumExtractedCharacters,
-            byteCount >= 0
+            responseByteCount >= 0
         else {
             return nil
         }
         self.sourceURL = sourceURL
         self.text = trimmed
-        self.responseByteCount = byteCount
+        self.responseByteCount = responseByteCount
     }
 }

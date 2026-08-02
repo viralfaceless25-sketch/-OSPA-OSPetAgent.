@@ -21,7 +21,13 @@ struct FetchedDocumentTests {
 
     @Test("Surrounding whitespace is trimmed")
     func trimsText() {
-        #expect(FetchedDocument(sourceURL: url, text: "  hi  ")?.text == "hi")
+        #expect(
+            FetchedDocument(
+                sourceURL: url,
+                text: "  hi  ",
+                responseByteCount: 6
+            )?.text == "hi"
+        )
     }
 
     @Test(
@@ -29,7 +35,13 @@ struct FetchedDocumentTests {
         arguments: ["", "   ", "\n\n\t"]
     )
     func refusesEmptyText(raw: String) {
-        #expect(FetchedDocument(sourceURL: url, text: raw) == nil)
+        #expect(
+            FetchedDocument(
+                sourceURL: url,
+                text: raw,
+                responseByteCount: raw.utf8.count
+            ) == nil
+        )
     }
 
     /// Refuse rather than truncate: a caller must never act on a document that
@@ -39,13 +51,24 @@ struct FetchedDocumentTests {
         let atCap = String(
             repeating: "a", count: FetchLimits.maximumExtractedCharacters
         )
-        #expect(FetchedDocument(sourceURL: url, text: atCap)?.text.count
-            == FetchLimits.maximumExtractedCharacters)
+        #expect(
+            FetchedDocument(
+                sourceURL: url,
+                text: atCap,
+                responseByteCount: atCap.utf8.count
+            )?.text.count == FetchLimits.maximumExtractedCharacters
+        )
 
         let overCap = String(
             repeating: "a", count: FetchLimits.maximumExtractedCharacters + 1
         )
-        #expect(FetchedDocument(sourceURL: url, text: overCap) == nil)
+        #expect(
+            FetchedDocument(
+                sourceURL: url,
+                text: overCap,
+                responseByteCount: overCap.utf8.count
+            ) == nil
+        )
     }
 
     @Test("The documented limits are the ones in force")
@@ -70,7 +93,7 @@ struct FetchedDocumentTests {
         "Everything else is refused",
         arguments: [
             "application/pdf", "image/png", "application/json",
-            "application/octet-stream", "text/htmlx", "",
+            "application/octet-stream", "text/htmlx", ";text/html", "",
         ]
     )
     func refusesOtherContentTypes(rawValue: String) {
