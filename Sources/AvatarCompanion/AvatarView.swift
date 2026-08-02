@@ -768,8 +768,7 @@ struct AvatarView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(
-                    !model.hasLiveResearchAuthorization
-                        || URL(string: model.officialDocumentationURL) == nil
+                    !model.canReadCurrentApprovedURL
                         || model.readPageQuestion.trimmingCharacters(
                             in: .whitespacesAndNewlines
                         ).isEmpty

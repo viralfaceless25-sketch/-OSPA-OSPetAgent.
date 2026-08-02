@@ -34,7 +34,16 @@ final class AvatarModel: ObservableObject {
     private struct ActivePageRead {
         let requestID: UUID
         let host: String
+        let authorizationID: UUID
+        let authorizationApprovedAt: Date
+        let authorizationExpiresAt: Date
         var byteCount: Int
+    }
+
+    private struct ResearchReadBudget {
+        let requestID: UUID
+        let approvedAt: Date
+        var consumedDocuments: Int
     }
 
     @Published var isExpanded = false
@@ -47,7 +56,9 @@ final class AvatarModel: ObservableObject {
     @Published var readPageQuestion = ""
     @Published var readPageStatus = ""
     @Published var researchRequest: ResearchRequest?
-    @Published var researchAuthorization: ResearchAuthorization?
+    @Published var researchAuthorization: ResearchAuthorization? {
+        didSet { scheduleResearchAuthorizationExpiry() }
+    }
     @Published private(set) var pageReadAuditEvents: [PageReadAuditEvent] = []
     @Published var discoveryStatus =
         "Identify the foreground app without reading its screen or files."
@@ -110,6 +121,25 @@ final class AvatarModel: ObservableObject {
     var hasLiveResearchAuthorization: Bool {
         guard let authorization = researchAuthorization else { return false }
         return Date() < authorization.expiresAt
+    }
+    var canReadCurrentApprovedURL: Bool {
+        guard let authorization = researchAuthorization,
+            Date() < authorization.expiresAt,
+            hasRemainingReadSlot(for: authorization),
+            let url = URL(string: officialDocumentationURL),
+            url.user == nil,
+            url.password == nil
+        else { return false }
+        do {
+            try researchGate.validateFetch(
+                url,
+                authorization: authorization,
+                now: Date()
+            )
+            return true
+        } catch {
+            return false
+        }
     }
 
     var onExpansionChanged: ((Bool) -> Void)?
@@ -181,6 +211,8 @@ final class AvatarModel: ObservableObject {
     private var brainCorrectionWriteTask: Task<Void, Never>?
     private var brainIdleShutdownTask: Task<Void, Never>?
     private var taskSequenceExpiryTask: Task<Void, Never>?
+    private var researchAuthorizationExpiryTask: Task<Void, Never>?
+    private var researchReadBudget: ResearchReadBudget?
     private var activePageRead: ActivePageRead?
 
     init(
@@ -673,10 +705,24 @@ final class AvatarModel: ObservableObject {
             )
             return
         }
+        guard consumeReadSlot(for: authorization) else {
+            readPageStatus =
+                "This approval’s page limit has been reached. Approve a new scope to continue."
+            appendPageReadAudit(
+                requestID: requestID,
+                host: host,
+                outcome: .denied,
+                byteCount: 0
+            )
+            return
+        }
 
         activePageRead = ActivePageRead(
             requestID: requestID,
             host: host,
+            authorizationID: authorization.request.id,
+            authorizationApprovedAt: authorization.approvedAt,
+            authorizationExpiresAt: authorization.expiresAt,
             byteCount: 0
         )
         isBrainThinking = true
@@ -699,6 +745,15 @@ final class AvatarModel: ObservableObject {
                         requestID: requestID,
                         generation: generation
                     )
+                }
+                guard await MainActor.run(body: {
+                    self?.isPageReadAuthorizationCurrent(
+                        requestID: authorization.request.id,
+                        approvedAt: authorization.approvedAt,
+                        expiresAt: authorization.expiresAt
+                    ) ?? false
+                }) else {
+                    throw ResearchBoundaryError.authorizationExpired
                 }
                 guard await serverController.ensureReady() == .ready else {
                     throw LocalBrainError.unavailable
@@ -1963,6 +2018,113 @@ final class AvatarModel: ObservableObject {
         )
     }
 
+    private func hasRemainingReadSlot(
+        for authorization: ResearchAuthorization
+    ) -> Bool {
+        let consumed =
+            if researchReadBudget?.requestID == authorization.request.id,
+                researchReadBudget?.approvedAt == authorization.approvedAt
+            {
+                researchReadBudget?.consumedDocuments ?? 0
+            } else {
+                0
+            }
+        return consumed < authorization.request.maxDocuments
+    }
+
+    private func consumeReadSlot(
+        for authorization: ResearchAuthorization
+    ) -> Bool {
+        let consumed =
+            if researchReadBudget?.requestID == authorization.request.id,
+                researchReadBudget?.approvedAt == authorization.approvedAt
+            {
+                researchReadBudget?.consumedDocuments ?? 0
+            } else {
+                0
+            }
+        guard consumed < authorization.request.maxDocuments else { return false }
+        researchReadBudget = ResearchReadBudget(
+            requestID: authorization.request.id,
+            approvedAt: authorization.approvedAt,
+            consumedDocuments: consumed + 1
+        )
+        return true
+    }
+
+    private func isPageReadAuthorizationCurrent(
+        requestID: UUID,
+        approvedAt: Date,
+        expiresAt: Date
+    ) -> Bool {
+        guard let authorization = researchAuthorization else { return false }
+        return authorization.request.id == requestID
+            && authorization.approvedAt == approvedAt
+            && authorization.expiresAt == expiresAt
+            && Date() < expiresAt
+    }
+
+    private func scheduleResearchAuthorizationExpiry() {
+        researchAuthorizationExpiryTask?.cancel()
+        researchAuthorizationExpiryTask = nil
+        guard let authorization = researchAuthorization else { return }
+
+        let requestID = authorization.request.id
+        let approvedAt = authorization.approvedAt
+        let expiresAt = authorization.expiresAt
+        let delay = max(0, min(expiresAt.timeIntervalSinceNow, 86_400))
+        let nanoseconds = UInt64(delay * 1_000_000_000)
+        researchAuthorizationExpiryTask = Task { [weak self] in
+            if nanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+            }
+            guard !Task.isCancelled else { return }
+            self?.expireResearchAuthorization(
+                requestID: requestID,
+                approvedAt: approvedAt,
+                expiresAt: expiresAt
+            )
+        }
+    }
+
+    private func expireResearchAuthorization(
+        requestID: UUID,
+        approvedAt: Date,
+        expiresAt: Date
+    ) {
+        guard let authorization = researchAuthorization,
+            authorization.request.id == requestID,
+            authorization.approvedAt == approvedAt,
+            authorization.expiresAt == expiresAt
+        else { return }
+        guard Date() >= expiresAt else {
+            scheduleResearchAuthorizationExpiry()
+            return
+        }
+
+        if let read = activePageRead,
+            read.authorizationID == requestID,
+            read.authorizationApprovedAt == approvedAt
+        {
+            brainTask?.cancel()
+            brainTask = nil
+            brainGeneration += 1
+            isBrainThinking = false
+            activePageRead = nil
+            readPageStatus =
+                "That approval has expired. Approve the site again to continue."
+            appendPageReadAudit(
+                requestID: read.requestID,
+                host: read.host,
+                outcome: .denied,
+                byteCount: read.byteCount
+            )
+        }
+        researchAuthorization = nil
+        discoveryStatus =
+            "Research approval expired. Prepare and approve the scope again."
+    }
+
     private func recordPageReadByteCount(
         _ byteCount: Int,
         requestID: UUID,
@@ -1993,6 +2155,21 @@ final class AvatarModel: ObservableObject {
                 requestID: read.requestID,
                 host: read.host,
                 outcome: .cancelled,
+                byteCount: read.byteCount
+            )
+            return
+        }
+        guard isPageReadAuthorizationCurrent(
+            requestID: read.authorizationID,
+            approvedAt: read.authorizationApprovedAt,
+            expiresAt: read.authorizationExpiresAt
+        ) else {
+            readPageStatus =
+                "That approval has expired. Approve the site again to continue."
+            appendPageReadAudit(
+                requestID: read.requestID,
+                host: read.host,
+                outcome: .denied,
                 byteCount: read.byteCount
             )
             return

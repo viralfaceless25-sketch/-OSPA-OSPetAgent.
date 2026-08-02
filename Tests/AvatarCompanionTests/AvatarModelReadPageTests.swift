@@ -46,6 +46,25 @@ private struct FailingDocumentFetcher: DocumentFetching {
     }
 }
 
+private actor CountingDocumentFetcher: DocumentFetching {
+    private var count = 0
+
+    func fetch(
+        url: URL,
+        authorization: ResearchAuthorization,
+        now: Date
+    ) async throws -> FetchedDocument {
+        count += 1
+        return FetchedDocument(
+            sourceURL: url,
+            text: "Counted text.",
+            responseByteCount: 13
+        )!
+    }
+
+    func callCount() -> Int { count }
+}
+
 private struct EchoReadPageChatService: LocalBrainChatService {
     func answer(request: String) async throws -> String {
         "Answer based on: \(request.prefix(120))"
@@ -72,7 +91,8 @@ private actor ControlledReadPageChatService: LocalBrainChatService {
 }
 
 private func readPageAuthorization(
-    duration: TimeInterval = 900
+    duration: TimeInterval = 900,
+    maxDocuments: Int = 5
 ) -> ResearchAuthorization {
     let now = Date()
     let request = ResearchRequest(
@@ -80,7 +100,7 @@ private func readPageAuthorization(
             bundleIdentifier: "com.example.app", displayName: "Example"
         ),
         approvedHosts: ["example.com"],
-        maxDocuments: 5,
+        maxDocuments: maxDocuments,
         createdAt: now
     )
     return try! ResearchGate().authorize(
@@ -268,5 +288,65 @@ struct AvatarModelReadPageTests {
         #expect(!model.hasLiveResearchAuthorization)
         model.researchAuthorization = readPageAuthorization()
         #expect(model.hasLiveResearchAuthorization)
+    }
+
+    @Test("The approved document cap is consumed before transport")
+    func enforcesDocumentCap() async {
+        let fetcher = CountingDocumentFetcher()
+        let model = model(fetcher: fetcher)
+        model.researchAuthorization = readPageAuthorization(maxDocuments: 1)
+
+        model.readApprovedPage(url: url, question: "first")
+        await waitForReadPage {
+            !model.readPageStatus.isEmpty && model.readPageStatus != "Reading…"
+        }
+        model.readApprovedPage(url: url, question: "second")
+
+        #expect(await fetcher.callCount() == 1)
+        #expect(model.pageReadAuditEvents.last?.outcome == .denied)
+        #expect(model.readPageStatus.contains("limit"))
+    }
+
+    @Test("Readiness validates the current URL against the live scope")
+    func urlScopedReadiness() {
+        let model = model(fetcher: StubDocumentFetcher(text: "Text."))
+        model.researchAuthorization = readPageAuthorization()
+        model.officialDocumentationURL = "https://evil.example.net/page"
+        #expect(!model.canReadCurrentApprovedURL)
+        model.officialDocumentationURL = "http://example.com/page"
+        #expect(!model.canReadCurrentApprovedURL)
+        model.officialDocumentationURL = "https://user:secret@example.com/page"
+        #expect(!model.canReadCurrentApprovedURL)
+        model.officialDocumentationURL = "https://example.com/page"
+        #expect(model.canReadCurrentApprovedURL)
+    }
+
+    @Test("Authorization expiry disables reading and refuses a late answer")
+    func expiryRefusesLateAnswer() async {
+        let chat = ControlledReadPageChatService()
+        let model = model(
+            fetcher: StubDocumentFetcher(text: "Some text."),
+            chat: chat
+        )
+        model.officialDocumentationURL = url.absoluteString
+        let liveAuthorization = readPageAuthorization(duration: 60)
+        model.researchAuthorization = liveAuthorization
+
+        model.readApprovedPage(url: url, question: "summarize")
+        await waitForReadPage { await chat.hasStarted() }
+        model.researchAuthorization = try! ResearchGate().authorize(
+            liveAuthorization.request,
+            userApproved: true,
+            now: liveAuthorization.approvedAt,
+            duration: -1
+        )
+        await waitForReadPage { model.researchAuthorization == nil }
+        #expect(!model.hasLiveResearchAuthorization)
+        #expect(!model.canReadCurrentApprovedURL)
+        await chat.finishAfterCancellation(returning: "Late expired answer")
+        for _ in 0..<50 { await Task.yield() }
+
+        #expect(!model.readPageStatus.contains("Late expired answer"))
+        #expect(model.pageReadAuditEvents.last?.outcome == .denied)
     }
 }
