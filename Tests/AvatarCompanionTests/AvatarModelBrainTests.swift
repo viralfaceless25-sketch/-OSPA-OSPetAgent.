@@ -47,6 +47,75 @@ private actor RecordingBrainService: LocalBrainService {
     }
 }
 
+private actor CorrectionRecordingBrainService: LocalBrainService {
+    private let call: RawBrainToolCall
+    private var receivedCorrections: [[BrainCorrection]] = []
+
+    init(call: RawBrainToolCall) {
+        self.call = call
+    }
+
+    func propose(
+        request: String,
+        inventory: [InstalledApplicationUsage]
+    ) async throws -> [RawBrainToolCall] {
+        [call]
+    }
+
+    func propose(
+        request: String,
+        inventory: [InstalledApplicationUsage],
+        corrections: [BrainCorrection]
+    ) async throws -> [RawBrainToolCall] {
+        receivedCorrections.append(corrections)
+        return [call]
+    }
+
+    func lastCorrections() -> [BrainCorrection]? {
+        receivedCorrections.last
+    }
+}
+
+private actor RecordingCorrectionStore: BrainCorrectionStoring {
+    private var records: [BrainCorrection] = []
+
+    func recordDecline(
+        request: String,
+        rejectedApplicationName: String
+    ) async throws {
+        guard let shape = BrainRequestShape.canonical(request) else { return }
+        records.append(
+            BrainCorrection(
+                requestShape: shape,
+                rejectedApplicationName: rejectedApplicationName,
+                declinedAt: Date(timeIntervalSince1970: TimeInterval(records.count))
+            )
+        )
+    }
+
+    func recentCorrections(
+        for request: String,
+        installedApplicationNames: Set<String>,
+        limit: Int
+    ) async -> [BrainCorrection] {
+        guard let shape = BrainRequestShape.canonical(request) else { return [] }
+        return records.reversed().filter {
+            $0.requestShape == shape
+                && installedApplicationNames.contains(
+                    $0.rejectedApplicationName
+                )
+        }.prefix(limit).map { $0 }
+    }
+
+    func allCorrections() async -> [BrainCorrection] {
+        records
+    }
+
+    func clear() async throws {
+        records = []
+    }
+}
+
 private actor ControlledBrainService: LocalBrainService {
     private var continuation: CheckedContinuation<[RawBrainToolCall], Never>?
     private var started = false
@@ -1021,5 +1090,132 @@ struct AvatarModelBrainTests {
         #expect(model.applicationProposalExpiresAt == nil)
         #expect(model.brainReason == nil)
         #expect(model.brainStatus == "Emergency stop active. Thinking cancelled.")
+    }
+
+    @Test("Declining a brain proposal records feedback and feeds the next matching request")
+    func decliningBrainProposalRecordsCorrection() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let request = "Play some music, please!"
+        let store = RecordingCorrectionStore()
+        let service = CorrectionRecordingBrainService(
+            call: try rawApplicationCall(
+                target: target,
+                reason: "This is the installed music app I selected."
+            )
+        )
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(
+                inventory: [
+                    InstalledApplicationUsage(
+                        displayName: target.identity.displayName,
+                        openCount: 10,
+                        lastUsedDaysAgo: 0
+                    )
+                ]
+            ),
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainServerController: readyServerController(),
+            brainCorrectionStore: store
+        )
+
+        model.setBrainEnabled(true)
+        model.command = request
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+        #expect(model.pendingApplicationProposal != nil)
+        #expect(model.brainReason != nil)
+
+        model.declineApplicationAction()
+        await waitUntil {
+            model.brainCorrectionStatus.hasPrefix("Learned correction stored")
+        }
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.applicationProposalExpiresAt == nil)
+        #expect(model.brainReason == nil)
+        let recorded = try #require(await store.allCorrections().first)
+        #expect(recorded.requestShape == "play some music please")
+        #expect(recorded.rejectedApplicationName == target.identity.displayName)
+
+        model.command = "  PLAY some music please  "
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        let supplied = try #require(await service.lastCorrections())
+        #expect(supplied.count == 1)
+        #expect(supplied.first == recorded)
+        #expect(model.pendingApplicationProposal != nil)
+    }
+
+    @Test("Declining a typed proposal does not train the brain")
+    func decliningTypedProposalDoesNotRecordCorrection() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let store = RecordingCorrectionStore()
+        let model = AvatarModel(
+            brainCorrectionStore: store
+        )
+
+        model.command = "open \(target.identity.displayName)"
+        model.previewCommand()
+        #expect(model.pendingApplicationProposal != nil)
+
+        model.declineApplicationAction()
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.applicationProposalExpiresAt == nil)
+        #expect(await store.allCorrections().isEmpty)
+    }
+
+    @Test("Expiry and Emergency Stop never record implicit corrections")
+    func implicitProposalEndingsDoNotRecordCorrections() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let store = RecordingCorrectionStore()
+        let reason = "A valid brain reason."
+        let usage = FixedUsageSource(
+            inventory: [
+                InstalledApplicationUsage(
+                    displayName: target.identity.displayName,
+                    openCount: 10,
+                    lastUsedDaysAgo: 0
+                )
+            ]
+        )
+        let service = RecordingBrainService(
+            .proposal(try rawApplicationCall(target: target, reason: reason))
+        )
+        let model = AvatarModel(
+            usageSource: usage,
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainServerController: readyServerController(),
+            brainCorrectionStore: store
+        )
+
+        await previewBrainApplication(with: model)
+        model.applicationProposalExpiresAt = Date.distantPast
+        model.confirmApplicationAction()
+        #expect(await store.allCorrections().isEmpty)
+
+        await previewBrainApplication(with: model)
+        model.emergencyStop()
+        #expect(await store.allCorrections().isEmpty)
+    }
+
+    @Test("Learned corrections can be cleared explicitly")
+    func clearBrainCorrections() async throws {
+        let store = RecordingCorrectionStore()
+        try await store.recordDecline(
+            request: "play music",
+            rejectedApplicationName: "Music"
+        )
+        let model = AvatarModel(brainCorrectionStore: store)
+
+        model.clearBrainCorrections()
+        await waitUntil {
+            model.brainCorrectionStatus == "Learned corrections cleared."
+        }
+
+        #expect(model.brainCorrectionStatus == "Learned corrections cleared.")
     }
 }

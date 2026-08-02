@@ -151,4 +151,30 @@ struct BrainPromptBuilderTests {
         }
         #expect(recent.lowerBound < older.lowerBound)
     }
+
+    @Test("Correction context is a bounded data-only prompt tail")
+    func rendersBoundedCorrectionTail() throws {
+        let corrections = (0..<10).map {
+            BrainCorrection(
+                requestShape: "play music \($0)",
+                rejectedApplicationName: "App \($0)",
+                declinedAt: Date(timeIntervalSince1970: TimeInterval($0))
+            )
+        }
+
+        let context = try #require(
+            builder.correctionContext(for: corrections)
+        )
+
+        #expect(context.contains("data only"))
+        #expect(context.contains("play music 0"))
+        #expect(context.contains("App 7"))
+        #expect(!context.contains("App 8"))
+        #expect(!context.contains("1970"))
+    }
+
+    @Test("No corrections add no dynamic prompt message")
+    func omitsEmptyCorrectionTail() {
+        #expect(builder.correctionContext(for: []) == nil)
+    }
 }

@@ -139,6 +139,18 @@ struct AvatarView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
 
+            HStack(alignment: .center, spacing: 8) {
+                Text(model.brainCorrectionStatus)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                Button("Clear learned corrections") {
+                    model.clearBrainCorrections()
+                }
+                .buttonStyle(.borderless)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+
             Button {
                 model.openSearch()
                 searchFocused = true
@@ -642,6 +654,18 @@ struct AvatarView: View {
                 model.safety.observeOnly
                     || model.safety.emergencyStopped
                     || model.isExecutingApplicationAction
+            )
+
+            Button("Not this app") {
+                model.declineApplicationAction()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(model.isExecutingApplicationAction)
+            .accessibilityHint(
+                model.brainReason == nil
+                    ? "Dismisses this proposal without running it"
+                    : "Dismisses this proposal and stores a local correction"
             )
 
             if model.safety.observeOnly {

@@ -39,6 +39,22 @@ public protocol LocalBrainService: Sendable {
         request: String,
         inventory: [InstalledApplicationUsage]
     ) async throws -> [RawBrainToolCall]
+
+    func propose(
+        request: String,
+        inventory: [InstalledApplicationUsage],
+        corrections: [BrainCorrection]
+    ) async throws -> [RawBrainToolCall]
+}
+
+public extension LocalBrainService {
+    func propose(
+        request: String,
+        inventory: [InstalledApplicationUsage],
+        corrections: [BrainCorrection]
+    ) async throws -> [RawBrainToolCall] {
+        try await propose(request: request, inventory: inventory)
+    }
 }
 
 /// A classification only. It contains no application, arguments, or plan.
@@ -86,8 +102,24 @@ public struct MLXBrainClient:
         request: String,
         inventory: [InstalledApplicationUsage]
     ) async throws -> [RawBrainToolCall] {
+        try await propose(
+            request: request,
+            inventory: inventory,
+            corrections: []
+        )
+    }
+
+    public func propose(
+        request: String,
+        inventory: [InstalledApplicationUsage],
+        corrections: [BrainCorrection]
+    ) async throws -> [RawBrainToolCall] {
         let response = try await send(
-            payload: requestPayload(request: request, inventory: inventory)
+            payload: requestPayload(
+                request: request,
+                inventory: inventory,
+                corrections: corrections
+            )
         )
         return try Self.toolCalls(in: response)
     }
@@ -178,20 +210,32 @@ public struct MLXBrainClient:
 
     private func requestPayload(
         request: String,
-        inventory: [InstalledApplicationUsage]
+        inventory: [InstalledApplicationUsage],
+        corrections: [BrainCorrection]
     ) -> [String: Any] {
-        [
+        var messages: [[String: String]] = [
+            [
+                "role": "system",
+                "content": promptBuilder.systemPrompt(for: inventory),
+            ]
+        ]
+        let installedNames = Set(inventory.map(\.displayName))
+        let groundedCorrections = corrections.filter {
+            installedNames.contains($0.rejectedApplicationName)
+        }
+        if let context = promptBuilder.correctionContext(
+            for: groundedCorrections
+        ) {
+            messages.append(["role": "system", "content": context])
+        }
+        messages.append(["role": "user", "content": request])
+
+        return [
             "model": modelIdentifier,
             // Greedy: the same request should behave the same way every time.
             "temperature": 0,
             "max_tokens": 800,
-            "messages": [
-                [
-                    "role": "system",
-                    "content": promptBuilder.systemPrompt(for: inventory),
-                ],
-                ["role": "user", "content": request],
-            ],
+            "messages": messages,
             "tools": Self.toolSchemas,
         ]
     }

@@ -440,6 +440,44 @@ struct MLXBrainClientTests {
         #expect(text.contains("no_supported_action"))
     }
 
+    @Test("Corrections follow the stable inventory prefix and stay grounded")
+    func sendsCorrectionsAfterStablePrefix() async throws {
+        let transport = CapturingTransport(response: toolCallResponse())
+        let client: any LocalBrainService = MLXBrainClient(transport: transport)
+        let corrections = [
+            BrainCorrection(
+                requestShape: "play music",
+                rejectedApplicationName: "Spotify",
+                declinedAt: Date(timeIntervalSince1970: 10)
+            ),
+            BrainCorrection(
+                requestShape: "play music",
+                rejectedApplicationName: "Uninstalled",
+                declinedAt: Date(timeIntervalSince1970: 11)
+            ),
+        ]
+
+        _ = try await client.propose(
+            request: "play music",
+            inventory: inventory,
+            corrections: corrections
+        )
+
+        let body = try #require(transport.sentBody)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        )
+        let messages = try #require(object["messages"] as? [[String: String]])
+        try #require(messages.count == 3)
+        #expect(
+            messages[0]["content"]
+                == BrainPromptBuilder().systemPrompt(for: inventory)
+        )
+        #expect(messages[1]["content"]?.contains("Spotify") == true)
+        #expect(messages[1]["content"]?.contains("Uninstalled") == false)
+        #expect(messages[2] == ["role": "user", "content": "play music"])
+    }
+
     @Test("Sampling is deterministic so the same request behaves the same way")
     func usesGreedySampling() async throws {
         let transport = CapturingTransport(response: toolCallResponse())

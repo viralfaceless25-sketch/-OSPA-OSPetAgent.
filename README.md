@@ -154,6 +154,16 @@ is missing rather than acting on it. Turning natural language on does not grant 
 new ability: it can only reach actions you could already trigger by typing, and each
 one still needs the same explicit confirmation.
 
+If the proposed app is wrong, choose **Not this app**. OSPA records only the
+normalized request shape and rejected installed-app name in the inspectable local
+JSON file `~/Library/Application Support/OSPA/brain-corrections.json`. It keeps at
+most 100 corrections, sends no telemetry, and uses at most eight matching recent
+corrections as negative preference hints. These hints never bypass the installed-app
+inventory or `BrainProposalValidator`.
+
+Use **Clear learned corrections** beside the natural-language status to wipe the
+store. You can also inspect or delete the JSON file directly while OSPA is closed.
+
 ## Try real execution
 
 Only this flow generates input events. It stays behind every existing gate.

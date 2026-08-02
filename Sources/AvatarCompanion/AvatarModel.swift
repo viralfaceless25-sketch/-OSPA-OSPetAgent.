@@ -5,13 +5,19 @@ import Foundation
 
 @MainActor
 final class AvatarModel: ObservableObject {
+    private struct BrainApplicationBinding {
+        let planID: UUID
+        let reason: String
+        let request: String
+    }
+
     private enum BrainProposalBinding {
-        case application(planID: UUID, reason: String)
+        case application(BrainApplicationBinding)
         case taskSequence(sequenceID: UUID)
 
         var reason: String? {
-            guard case let .application(_, reason) = self else { return nil }
-            return reason
+            guard case let .application(binding) = self else { return nil }
+            return binding.reason
         }
     }
 
@@ -84,6 +90,8 @@ final class AvatarModel: ObservableObject {
     @Published var isBrainEnabled = false
     @Published var isBrainThinking = false
     @Published var brainStatus = "Natural language is off. Type exact commands."
+    @Published private(set) var brainCorrectionStatus =
+        "Learned app corrections stay only on this Mac."
     var brainReason: String? { brainProposalBinding?.reason }
 
     var onExpansionChanged: ((Bool) -> Void)?
@@ -132,6 +140,7 @@ final class AvatarModel: ObservableObject {
     private let brainService: any LocalBrainService
     private let brainIntentRouter: any LocalBrainIntentRouting
     private let brainChatService: any LocalBrainChatService
+    private let brainCorrectionStore: any BrainCorrectionStoring
     /// Monotonic token identifying the newest brain request. A handler whose
     /// task slipped past its cancellation guard into the MainActor hop must not
     /// clear `brainTask` or publish, because doing so would orphan the request
@@ -149,6 +158,7 @@ final class AvatarModel: ObservableObject {
     private var personalSearchItems: [LocalSearchItem] = []
     private var brainProposalBinding: BrainProposalBinding?
     private var brainTask: Task<Void, Never>?
+    private var brainCorrectionWriteTask: Task<Void, Never>?
     private var brainIdleShutdownTask: Task<Void, Never>?
     private var taskSequenceExpiryTask: Task<Void, Never>?
 
@@ -158,6 +168,7 @@ final class AvatarModel: ObservableObject {
         brainIntentRouter: any LocalBrainIntentRouting = MLXBrainClient(),
         brainChatService: any LocalBrainChatService = MLXBrainClient(),
         brainServerController: LocalBrainServerController? = nil,
+        brainCorrectionStore: any BrainCorrectionStoring = BrainCorrectionStore(),
         brainIdleShutdownInterval: TimeInterval = 300,
         frontmostBundleIdentifier: @MainActor @Sendable @escaping () -> String? = {
             NSWorkspace.shared.frontmostApplication?.bundleIdentifier
@@ -167,6 +178,7 @@ final class AvatarModel: ObservableObject {
         self.brainService = brainService
         self.brainIntentRouter = brainIntentRouter
         self.brainChatService = brainChatService
+        self.brainCorrectionStore = brainCorrectionStore
         self.brainServerController =
             brainServerController ?? Self.makeLiveBrainServerController()
         self.brainIdleShutdownInterval = brainIdleShutdownInterval
@@ -930,6 +942,64 @@ final class AvatarModel: ObservableObject {
         }
     }
 
+    func declineApplicationAction() {
+        guard let proposal = pendingApplicationProposal else {
+            applicationActionStatus = "No app proposal is waiting for a decision."
+            return
+        }
+
+        let learnedCorrection: (request: String, applicationName: String)? =
+            if case let .application(binding) = brainProposalBinding,
+                binding.planID == proposal.plan.id
+            {
+                (binding.request, proposal.application.identity.displayName)
+            } else {
+                nil
+            }
+
+        pendingApplicationProposal = nil
+        applicationProposalExpiresAt = nil
+        if pendingApplicationSequence?.applicationProposal.plan.id == proposal.plan.id {
+            pendingApplicationSequence = nil
+            applicationSequenceFirstStepCompleted = false
+        }
+        applicationActionStatus = "Proposal declined. Nothing was run."
+
+        guard let learnedCorrection else { return }
+        let store = brainCorrectionStore
+        let previousWrite = brainCorrectionWriteTask
+        brainCorrectionWriteTask = Task { @MainActor [weak self] in
+            await previousWrite?.value
+            do {
+                try await store.recordDecline(
+                    request: learnedCorrection.request,
+                    rejectedApplicationName: learnedCorrection.applicationName
+                )
+                let count = await store.allCorrections().count
+                self?.brainCorrectionStatus =
+                    "Learned correction stored locally (\(count) total)."
+            } catch {
+                self?.brainCorrectionStatus =
+                    "Couldn’t save the learned correction. Nothing was sent."
+            }
+        }
+    }
+
+    func clearBrainCorrections() {
+        let previousWrite = brainCorrectionWriteTask
+        let store = brainCorrectionStore
+        brainCorrectionWriteTask = Task { @MainActor [weak self] in
+            await previousWrite?.value
+            do {
+                try await store.clear()
+                self?.brainCorrectionStatus = "Learned corrections cleared."
+            } catch {
+                self?.brainCorrectionStatus =
+                    "Couldn’t clear learned corrections. Nothing was sent."
+            }
+        }
+    }
+
     func confirmLocalItemAction() {
         guard
             let plan = pendingLocalItemOpenPlan,
@@ -1565,6 +1635,8 @@ final class AvatarModel: ObservableObject {
         let service = brainService
         let validator = brainValidator
         let serverController = brainServerController
+        let correctionStore = brainCorrectionStore
+        let pendingCorrectionWrite = brainCorrectionWriteTask
 
         brainTask = Task { [weak self] in
             let outcome: Result<[BrainProposal], any Error>
@@ -1572,10 +1644,17 @@ final class AvatarModel: ObservableObject {
                 guard await serverController.ensureReady() == .ready else {
                     throw LocalBrainError.unavailable
                 }
+                await pendingCorrectionWrite?.value
+                let corrections = await correctionStore.recentCorrections(
+                    for: request,
+                    installedApplicationNames: installedNames,
+                    limit: BrainCorrectionStore.maximumPromptCount
+                )
                 let raw = try await serverController.withTrackedRequest {
                     try await service.propose(
                         request: request,
-                        inventory: inventory
+                        inventory: inventory,
+                        corrections: corrections
                     )
                 }
                 outcome = .success(
@@ -1593,13 +1672,18 @@ final class AvatarModel: ObservableObject {
             }
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                self?.finishBrainProposal(outcome, generation: generation)
+                self?.finishBrainProposal(
+                    outcome,
+                    request: request,
+                    generation: generation
+                )
             }
         }
     }
 
     private func finishBrainProposal(
         _ outcome: Result<[BrainProposal], any Error>,
+        request: String,
         generation: Int
     ) {
         // Superseded or cancelled while suspended on the MainActor hop. This is
@@ -1632,7 +1716,11 @@ final class AvatarModel: ObservableObject {
                 if let command = proposal.parsedApplicationCommand {
                     previewApplicationCommand(command)
                     if let planID = pendingApplicationProposal?.plan.id {
-                        bindBrainReason(proposal.reason, to: planID)
+                        bindBrainReason(
+                            proposal.reason,
+                            request: request,
+                            to: planID
+                        )
                     } else {
                         brainStatus = proposal.reason
                     }
@@ -1691,10 +1779,18 @@ final class AvatarModel: ObservableObject {
         }
     }
 
-    private func bindBrainReason(_ reason: String, to planID: UUID) {
+    private func bindBrainReason(
+        _ reason: String,
+        request: String,
+        to planID: UUID
+    ) {
         guard pendingApplicationProposal?.plan.id == planID else { return }
         brainProposalBinding = .application(
-            planID: planID, reason: reason
+            BrainApplicationBinding(
+                planID: planID,
+                reason: reason,
+                request: request
+            )
         )
         brainStatus = reason
     }
@@ -1707,8 +1803,8 @@ final class AvatarModel: ObservableObject {
     private func clearBrainOriginatedProposal() {
         guard let binding = brainProposalBinding else { return }
         switch binding {
-        case let .application(planID, _):
-            if pendingApplicationProposal?.plan.id == planID {
+        case let .application(applicationBinding):
+            if pendingApplicationProposal?.plan.id == applicationBinding.planID {
                 pendingApplicationProposal = nil
                 applicationProposalExpiresAt = nil
             }
@@ -1724,8 +1820,8 @@ final class AvatarModel: ObservableObject {
         guard let binding = brainProposalBinding else { return }
         let isDetached =
             switch binding {
-            case let .application(planID, _):
-                pendingApplicationProposal?.plan.id != planID
+            case let .application(applicationBinding):
+                pendingApplicationProposal?.plan.id != applicationBinding.planID
             case let .taskSequence(sequenceID):
                 pendingTaskSequence?.id != sequenceID
             }
@@ -1739,7 +1835,8 @@ final class AvatarModel: ObservableObject {
         brainProposalBinding = nil
         let ownsCurrentStatus =
             switch binding {
-            case let .application(_, reason): brainStatus == reason
+            case let .application(applicationBinding):
+                brainStatus == applicationBinding.reason
             case .taskSequence: true
             }
         if ownsCurrentStatus {
