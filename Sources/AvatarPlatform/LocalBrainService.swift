@@ -84,6 +84,30 @@ public struct BrainProposalConfidence: Equatable, Sendable {
         self.score = score
         self.alternatives = alternatives
     }
+
+    public func isValid(
+        for proposals: [BrainProposal],
+        inventory: [InstalledApplicationUsage]
+    ) -> Bool {
+        let installedNames = Set(inventory.map(\.displayName))
+        let proposedNames = Set(proposals.compactMap { proposal in
+            switch proposal {
+            case let .openApplication(name, _),
+                let .switchToApplication(name, _):
+                name
+            case .noSupportedAction:
+                nil
+            }
+        })
+        return score.isFinite && (0...1).contains(score)
+            && alternatives.count <= 2
+            && Set(alternatives).count == alternatives.count
+            && alternatives.allSatisfy {
+                installedNames.contains($0)
+                    && !proposedNames.contains($0)
+                    && BrainProposalValidator.isSafeApplicationDisplayName($0)
+            }
+    }
 }
 
 /// Scores an already-validated proposal for clarification UX only.
@@ -584,24 +608,16 @@ public struct MLXBrainClient:
             )
         }
 
-        let score = scoreNumber.doubleValue
-        let installedNames = Set(inventory.map(\.displayName))
-        let proposedNames = Set(proposals.compactMap(applicationName(in:)))
-        guard score.isFinite, (0...1).contains(score),
-            alternatives.count <= 2,
-            Set(alternatives).count == alternatives.count,
-            alternatives.allSatisfy({
-                installedNames.contains($0) && !proposedNames.contains($0)
-            })
-        else {
+        let confidence = BrainProposalConfidence(
+            score: scoreNumber.doubleValue,
+            alternatives: alternatives
+        )
+        guard confidence.isValid(for: proposals, inventory: inventory) else {
             throw LocalBrainError.badResponse(
                 "invalid proposal confidence"
             )
         }
-        return BrainProposalConfidence(
-            score: score,
-            alternatives: alternatives
-        )
+        return confidence
     }
 
     private static func applicationName(

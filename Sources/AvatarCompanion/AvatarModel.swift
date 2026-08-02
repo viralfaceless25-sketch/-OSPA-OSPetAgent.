@@ -1679,13 +1679,22 @@ final class AvatarModel: ObservableObject {
                 {
                     confidence = nil
                 } else {
-                    confidence = try await serverController.withTrackedRequest {
+                    let evaluated = try await serverController.withTrackedRequest {
                         try await evaluator.evaluate(
                             request: request,
                             proposals: proposals,
                             inventory: inventory
                         )
                     }
+                    guard evaluated.isValid(
+                        for: proposals,
+                        inventory: inventory
+                    ) else {
+                        throw LocalBrainError.badResponse(
+                            "invalid proposal confidence"
+                        )
+                    }
+                    confidence = evaluated
                 }
                 outcome = .success(
                     EvaluatedBrainProposals(
@@ -1940,6 +1949,9 @@ final class AvatarModel: ObservableObject {
         proposals: [BrainProposal],
         alternatives: [String]
     ) -> String {
+        if proposals.count > 1 {
+            return "I’m not sure which apps you mean. Please name them in order."
+        }
         guard !alternatives.isEmpty,
             proposals.count == 1,
             let proposedName = proposals.first.flatMap({ proposal in

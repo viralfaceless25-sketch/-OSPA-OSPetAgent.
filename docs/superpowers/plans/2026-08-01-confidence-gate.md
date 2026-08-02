@@ -41,4 +41,4 @@ public struct BrainProposalConfidence: Equatable, Sendable {
 - [x] Inject evaluator. In `startBrainProposal`, validate raw calls first, then evaluate validated proposals. Extend the generation-bound outcome so only passing confidence reaches `finishBrainProposal` publication.
 - [x] Keep threshold as documented `0.65` UX constant and alternatives display-only.
 - [x] Run focused suites, `graphify update .`, `make test`, and `make app`; commit/push explicit paths.
-- [ ] Dispatch one read-only Step 4 reviewer. TDD-fix verified Critical/Important findings, re-run gates only if code changes, append ledger, report both steps, stop.
+- [x] Dispatch one read-only Step 4 reviewer. TDD-fix verified Critical/Important findings, re-run gates only if code changes, append ledger, report both steps, stop.

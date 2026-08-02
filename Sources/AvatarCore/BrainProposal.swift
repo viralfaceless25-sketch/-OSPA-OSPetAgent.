@@ -100,6 +100,19 @@ public struct BrainProposalValidator: Sendable {
 
     public init() {}
 
+    /// Shared display boundary for installed names shown outside a validated
+    /// action proposal, such as confidence-gate alternatives.
+    public static func isSafeApplicationDisplayName(_ name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed == name else { return false }
+        do {
+            try validateNameShape(name)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     /// Validates a complete model response before any proposal can leave this
     /// pure boundary. `map` may build a local prefix while checking, but a
     /// thrown error prevents the array from being returned, so callers can

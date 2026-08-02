@@ -579,5 +579,29 @@ struct MLXBrainClientTests {
                 )
             }
         }
+
+        let unsafeName = "Music\u{202E}"
+        let unsafeAlternative = MLXBrainClient(
+            transport: StubTransport(
+                body: toolCallResponse(
+                    name: "score_proposal",
+                    arguments:
+                        #"{\"score\":0.5,\"alternatives\":[\"Music‮\"]}"#
+                )
+            )
+        )
+        await #expect(throws: (any Error).self) {
+            try await unsafeAlternative.evaluate(
+                request: "play music",
+                proposals: [proposal],
+                inventory: expandedInventory + [
+                    InstalledApplicationUsage(
+                        displayName: unsafeName,
+                        openCount: 1,
+                        lastUsedDaysAgo: 0
+                    )
+                ]
+            )
+        }
     }
 }

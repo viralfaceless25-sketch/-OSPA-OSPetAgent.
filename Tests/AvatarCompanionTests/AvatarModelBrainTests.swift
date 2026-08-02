@@ -1522,4 +1522,86 @@ struct AvatarModelBrainTests {
                 == "Natural language is off. Type exact commands."
         )
     }
+
+    @Test("Malformed injected confidence cannot fail open into a preview")
+    func malformedInjectedConfidenceFailsClosed() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let usage = InstalledApplicationUsage(
+            displayName: target.identity.displayName,
+            openCount: 10,
+            lastUsedDaysAgo: 0
+        )
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: [usage]),
+            brainService: RecordingBrainService(
+                .proposal(
+                    try rawApplicationCall(
+                        target: target,
+                        reason: "This must not publish."
+                    )
+                )
+            ),
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainProposalEvaluator: RecordingProposalEvaluator(
+                .confidence(
+                    BrainProposalConfidence(score: .nan, alternatives: [])
+                )
+            ),
+            brainServerController: readyServerController()
+        )
+
+        await previewBrainApplication(with: model)
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.brainReason == nil)
+    }
+
+    @Test("Low-confidence chains ask for app names in order")
+    func lowConfidenceChainUsesPluralClarification() async throws {
+        let applications = try exactInstalledApplications(count: 2)
+        let first = try #require(applications.first)
+        let second = try #require(applications.dropFirst().first)
+        let calls = [
+            try rawApplicationCall(
+                target: first,
+                reason: "First uncertain step."
+            ),
+            try rawApplicationCall(
+                target: second,
+                reason: "Second uncertain step."
+            ),
+        ]
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(
+                inventory: applications.map {
+                    InstalledApplicationUsage(
+                        displayName: $0.identity.displayName,
+                        openCount: 10,
+                        lastUsedDaysAgo: 0
+                    )
+                }
+            ),
+            brainService: RecordingBrainService(.proposals(calls)),
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainProposalEvaluator: RecordingProposalEvaluator(
+                .confidence(
+                    BrainProposalConfidence(
+                        score: 0.2,
+                        alternatives: []
+                    )
+                )
+            ),
+            brainServerController: readyServerController()
+        )
+
+        await previewBrainApplication(with: model)
+
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(
+            model.brainStatus
+                == "I’m not sure which apps you mean. Please name them in order."
+        )
+    }
 }
