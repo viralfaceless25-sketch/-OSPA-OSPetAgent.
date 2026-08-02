@@ -187,7 +187,7 @@ struct MLXBrainClientTests {
         )
         await #expect(
             throws: LocalBrainError.badResponse(
-                "intent route must not carry arguments"
+                "intent route arguments must be absent or empty"
             )
         ) {
             try await argumentBearing.route(request: "weather")
@@ -200,7 +200,7 @@ struct MLXBrainClientTests {
         )
         await #expect(
             throws: LocalBrainError.badResponse(
-                "intent route must not carry arguments"
+                "intent route arguments must be absent or empty"
             )
         ) {
             try await malformed.route(request: "hello")

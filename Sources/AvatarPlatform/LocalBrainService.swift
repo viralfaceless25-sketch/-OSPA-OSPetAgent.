@@ -115,7 +115,7 @@ public struct MLXBrainClient:
                 arguments.isEmpty
             else {
                 throw LocalBrainError.badResponse(
-                    "intent route must not carry arguments"
+                    "intent route arguments must be absent or empty"
                 )
             }
         }

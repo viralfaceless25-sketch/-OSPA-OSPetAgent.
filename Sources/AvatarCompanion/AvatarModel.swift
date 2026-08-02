@@ -1480,6 +1480,10 @@ final class AvatarModel: ObservableObject {
     /// action state: nothing it returns can become something OSPA does.
     private func startBrainChat(for request: String) {
         brainTask?.cancel()
+        // Symmetry with the routing and proposal starts: the timer armed by the
+        // routing request that led here must not outlive it.
+        brainIdleShutdownTask?.cancel()
+        brainIdleShutdownTask = nil
         isBrainThinking = true
         brainStatus = "Thinking…"
 
@@ -1554,6 +1558,8 @@ final class AvatarModel: ObservableObject {
         isBrainThinking = true
         brainStatus = "Thinking…"
 
+        brainGeneration += 1
+        let generation = brainGeneration
         let inventory = usageSource.currentInventory()
         let installedNames = Set(inventory.map(\.displayName))
         let service = brainService
@@ -1587,14 +1593,20 @@ final class AvatarModel: ObservableObject {
             }
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                self?.finishBrainProposal(outcome)
+                self?.finishBrainProposal(outcome, generation: generation)
             }
         }
     }
 
     private func finishBrainProposal(
-        _ outcome: Result<[BrainProposal], any Error>
+        _ outcome: Result<[BrainProposal], any Error>,
+        generation: Int
     ) {
+        // Superseded or cancelled while suspended on the MainActor hop. This is
+        // the path that reaches a consent surface, so it must not clear another
+        // request's brainTask -- which would put that request beyond Emergency
+        // Stop -- nor publish a proposal the user has already moved on from.
+        guard generation == brainGeneration else { return }
         brainTask = nil
         isBrainThinking = false
 
@@ -1667,6 +1679,11 @@ final class AvatarModel: ObservableObject {
     private func cancelBrainProposal() {
         brainTask?.cancel()
         brainTask = nil
+        // Invalidate in-flight handlers too. Cancellation alone is not enough:
+        // a task already past its cancellation guard and suspended on the
+        // MainActor hop would otherwise still publish for a request the user
+        // has abandoned.
+        brainGeneration += 1
         isBrainThinking = false
         clearBrainOriginatedProposal()
         if isBrainEnabled, !safety.emergencyStopped {

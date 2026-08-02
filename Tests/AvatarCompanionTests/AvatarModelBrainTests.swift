@@ -158,6 +158,34 @@ private actor ControlledChatService: LocalBrainChatService {
     }
 }
 
+/// Thread-safe counters for observing controller closures, which run outside
+/// the actor. Locked rather than `@unchecked Sendable` with bare mutation.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.withLock { count }
+    }
+
+    func increment() {
+        lock.withLock { count += 1 }
+    }
+}
+
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+
+    var isSet: Bool {
+        lock.withLock { flag }
+    }
+
+    func set() {
+        lock.withLock { flag = true }
+    }
+}
+
 private func readyServerController() -> LocalBrainServerController {
     LocalBrainServerController(
         launch: {},
@@ -405,36 +433,58 @@ struct AvatarModelBrainTests {
         #expect(model.previewedAction == nil)
     }
 
-    /// A cancelled request must still arm the idle timer. Emergency Stop and the
-    /// brain toggle shut the server down explicitly, but replacing a pending
-    /// request by picking a search result does neither — without this the
-    /// multi-gigabyte model server stays resident until the app quits.
-    @Test("A request cancelled by a search selection still releases the server")
+    /// A cancelled request must still arm the idle timer, or the resident
+    /// multi-gigabyte model server leaks until the app quits.
+    ///
+    /// Emergency Stop and the brain toggle are NOT valid ways to test this —
+    /// both call `shutdown()` outright, so they pass whether or not the arming
+    /// happens. This uses a plain re-preview, which cancels through
+    /// `cancelBrainProposal()` and shuts nothing down explicitly, and observes
+    /// the controller's own `terminate` closure.
+    @Test("A request cancelled without an explicit shutdown still releases the server")
     func cancelledRoutingStillArmsIdleShutdown() async throws {
+        let terminations = Counter()
+        // Unhealthy until launched, so the controller owns the process and
+        // shutdown() is actually allowed to terminate it.
+        let launched = Flag()
+        let controller = LocalBrainServerController(
+            launch: { launched.set() },
+            terminate: { terminations.increment() },
+            isHealthy: { launched.isSet },
+            now: { Date() },
+            startupTimeout: 5,
+            idleShutdownInterval: 0
+        )
         let router = ControlledIntentRouter()
         let model = AvatarModel(
             usageSource: FixedUsageSource(inventory: inventory),
             brainService: RecordingBrainService(.failure(.unavailable)),
             brainIntentRouter: router,
-            brainServerController: readyServerController(),
+            brainServerController: controller,
             brainIdleShutdownInterval: 0
         )
         model.isBrainEnabled = true
         model.command = "what's the weather in Tokyo"
 
         model.previewCommand()
-        for _ in 0..<200 {
+        for _ in 0..<500 {
             if await router.hasStarted() { break }
             await Task.yield()
         }
         #expect(await router.hasStarted())
 
-        model.emergencyStop()
+        // Cancel the way a search selection or a fresh preview does: no
+        // explicit server shutdown anywhere on this path.
+        model.command = "open Finder"
+        model.previewCommand()
         await router.finishAfterCancellation(returning: .nativeApp)
-        for _ in 0..<50 { await Task.yield() }
 
-        #expect(model.pendingApplicationProposal == nil)
-        #expect(model.brainStatus == "Emergency stop active. Thinking cancelled.")
+        for _ in 0..<500 {
+            if terminations.value > 0 { break }
+            await Task.yield()
+        }
+        #expect(terminations.value > 0)
+        #expect(model.pendingTaskSequence == nil)
     }
 
     @Test("The native app lane still refuses an invalid model tool")
