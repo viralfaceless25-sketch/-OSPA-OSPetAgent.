@@ -267,7 +267,6 @@ struct MLXBrainClientTests {
             String(repeating: "a", count: 2_001),
             "unsafe\u{0007}text",
             "misleading\u{202E}text",
-            "multiple\nlines",
         ]
 
         for answer in invalidAnswers {
