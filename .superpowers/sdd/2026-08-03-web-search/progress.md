@@ -112,3 +112,28 @@ Test delta: +24 tests, +5 suites.
 - No result caching or persistence.
 - No Keychain write UI.
 - No merge or pull request.
+
+## Reviewer Fix Round 1
+
+- Added 15-second request and resource timeouts to the ephemeral search session
+  configuration. Focused RED: `swift test --filter
+  sessionConfigurationHasAbsoluteTimeouts` failed to compile because the
+  configuration seam did not exist. GREEN: 1 test in 1 suite passed.
+- Added the exact Brave query item `result_filter=web`. Focused RED: `swift
+  test --filter buildsBoundedRequest` failed because the item was absent.
+  GREEN: 1 test in 1 suite passed.
+- Made the Brave `web` response field optional. Both `web: null` and a missing
+  `web` field now decode to an empty bounded result set. Focused RED: `swift
+  test --filter acceptsAbsentWebResults` threw `badResponse` for both fixtures.
+  GREEN: both parameterized cases passed.
+- Final focused verification: `swift test --filter WebSearch` passed with 26
+  tests in 5 suites.
+- Final full verification: `make test` passed with 328 tests in 39 suites.
+- Final release build: `make app` completed, linked, and signed
+  `build/AvatarCompanion.app`.
+
+Deferred reviewer Minor: the structural authority guards currently inspect only
+the search struct body and two source files. A future extension or
+credential-store authority reference could therefore evade those guards. This
+test-hardening concern is recorded for later work and is not part of this focused
+fix round.

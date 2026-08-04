@@ -45,6 +45,19 @@ struct BoundedWebSearchResponseBuffer {
 public struct URLSessionWebSearchTransport: WebSearchTransport {
     public init() {}
 
+    static func sessionConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest =
+            WebSearchLimits.timeoutSeconds
+        configuration.timeoutIntervalForResource =
+            WebSearchLimits.timeoutSeconds
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        configuration.urlCache = nil
+        return configuration
+    }
+
     public func send(
         _ request: URLRequest,
         providerHost: String,
@@ -57,11 +70,7 @@ public struct URLSessionWebSearchTransport: WebSearchTransport {
             throw WebSearchError.badResponse
         }
 
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpCookieAcceptPolicy = .never
-        configuration.httpCookieStorage = nil
-        configuration.urlCredentialStorage = nil
-        configuration.urlCache = nil
+        let configuration = Self.sessionConfiguration()
         let session = URLSession(configuration: configuration)
         let delegate = ApprovedHostRedirectDelegate(
             approvedHosts: [providerHost]
@@ -154,6 +163,7 @@ public struct BraveSearchClient: WebSearchService {
         components.queryItems = [
             URLQueryItem(name: "q", value: query.value),
             URLQueryItem(name: "count", value: String(maxResults)),
+            URLQueryItem(name: "result_filter", value: "web"),
         ]
         guard let url = components.url else {
             throw WebSearchError.badResponse
@@ -203,12 +213,13 @@ public struct BraveSearchClient: WebSearchService {
         } catch {
             throw WebSearchError.badResponse
         }
-        guard decoded.web.results.count <= maxResults else {
+        let rawResults = decoded.web?.results ?? []
+        guard rawResults.count <= maxResults else {
             throw WebSearchError.badResponse
         }
 
         do {
-            let results = try decoded.web.results.map { raw in
+            let results = try rawResults.map { raw in
                 guard let url = URL(string: raw.url) else {
                     throw WebSearchError.badResponse
                 }
@@ -228,7 +239,7 @@ public struct BraveSearchClient: WebSearchService {
 }
 
 private struct BraveResponse: Decodable {
-    let web: BraveWebResults
+    let web: BraveWebResults?
 }
 
 private struct BraveWebResults: Decodable {

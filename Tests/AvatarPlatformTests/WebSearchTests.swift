@@ -208,6 +208,7 @@ struct BraveSearchClientTests {
         )
         #expect(queryItems["q"] == "swift actors")
         #expect(queryItems["count"] == "3")
+        #expect(queryItems["result_filter"] == "web")
         #expect(request.timeoutInterval == WebSearchLimits.timeoutSeconds)
         #expect(
             request.value(forHTTPHeaderField: "X-Subscription-Token")
@@ -218,6 +219,21 @@ struct BraveSearchClientTests {
             transport.calls.lastByteLimit
                 == WebSearchLimits.maximumResponseBytes
         )
+    }
+
+    @Test(
+        "Null or missing web results decode as an empty bounded set",
+        arguments: [
+            #"{"type":"search","web":null}"#,
+            #"{"type":"search"}"#,
+        ]
+    )
+    func acceptsAbsentWebResults(body: String) async throws {
+        let results = try await client(
+            response: searchResponse(body: body)
+        ).search(query: WebSearchQuery("no matches"), maxResults: 3)
+
+        #expect(results.results.isEmpty)
     }
 
     @Test("HTTP failure, timeout, malformed JSON, and network failure stay distinct")
@@ -283,6 +299,15 @@ struct BraveSearchClientTests {
 
 @Suite("Bounded Brave response transport")
 struct WebSearchTransportTests {
+    @Test("Session config enforces 15-second request and resource timeouts")
+    func sessionConfigurationHasAbsoluteTimeouts() {
+        let configuration =
+            URLSessionWebSearchTransport.sessionConfiguration()
+
+        #expect(configuration.timeoutIntervalForRequest == 15)
+        #expect(configuration.timeoutIntervalForResource == 15)
+    }
+
     @Test("The byte after the cap is refused before it can be buffered")
     func refusesBytePastCap() throws {
         var buffer = BoundedWebSearchResponseBuffer(limit: 2)
