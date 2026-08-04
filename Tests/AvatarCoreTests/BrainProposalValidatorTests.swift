@@ -541,6 +541,20 @@ struct BrainProposalValidatorTests {
         #expect(BrainChatAnswer.sanitized("Safe\u{0000}unsafe") == nil)
     }
 
+    @Test("Unsafe scalars remain rejected at chat answer boundaries")
+    func rejectsUnsafeScalarsAtChatAnswerBoundaries() {
+        let unsafeAnswers = [
+            "\rSafe",
+            "Safe\u{2028}",
+            "\u{2029}Safe",
+            "Safe\u{200B}",
+        ]
+
+        for answer in unsafeAnswers {
+            #expect(BrainChatAnswer.sanitized(answer) == nil)
+        }
+    }
+
     @Test("A chat answer newline flood is capped")
     func capsChatAnswerNewlineFlood() {
         #expect(

@@ -283,6 +283,29 @@ struct MLXBrainClientTests {
         }
     }
 
+    @Test("Unsafe boundary scalars are refused before chat publication")
+    func rejectsUnsafeBoundaryScalarsInChatResponse() async throws {
+        let invalidAnswers = [
+            "\rSafe",
+            "Safe\u{2028}",
+            "\u{2029}Safe",
+            "Safe\u{200B}",
+        ]
+
+        for answer in invalidAnswers {
+            let client = MLXBrainClient(
+                transport: StubTransport(
+                    body: try chatResponse(answer)
+                )
+            )
+            await #expect(
+                throws: LocalBrainError.badResponse("unsafe chat response")
+            ) {
+                try await client.answer(request: "hello")
+            }
+        }
+    }
+
     @Test("A malformed chat response is refused rather than guessed")
     func rejectsMalformedChatResponse() async {
         let client = MLXBrainClient(

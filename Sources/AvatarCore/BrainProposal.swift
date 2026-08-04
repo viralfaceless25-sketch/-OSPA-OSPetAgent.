@@ -313,12 +313,7 @@ public enum BrainChatAnswer: Sendable {
     /// carries unsafe control, format, or line/paragraph separators. Newlines
     /// and tabs are allowed, with newline runs capped to one blank line.
     public static func sanitized(_ answer: String) -> String? {
-        let trimmed = answer.trimmingCharacters(in: .whitespacesAndNewlines)
-        let scalars = trimmed.unicodeScalars
-        guard (1...maximumScalarCount).contains(scalars.count) else {
-            return nil
-        }
-        let hasUnsafeScalar = scalars.contains { scalar in
+        let hasUnsafeScalar = answer.unicodeScalars.contains { scalar in
             switch scalar.properties.generalCategory {
             // Cc/Cf cover control and format characters, including zero-width
             // and bidi overrides. U+000A and U+0009 are the only display-safe
@@ -332,6 +327,12 @@ public enum BrainChatAnswer: Sendable {
             }
         }
         guard !hasUnsafeScalar else { return nil }
+
+        let trimmed = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scalars = trimmed.unicodeScalars
+        guard (1...maximumScalarCount).contains(scalars.count) else {
+            return nil
+        }
 
         var sanitized = ""
         var consecutiveNewlines = 0
