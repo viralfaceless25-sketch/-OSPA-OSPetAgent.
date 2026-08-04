@@ -310,8 +310,8 @@ public enum BrainChatAnswer: Sendable {
     public static let maximumScalarCount = 2_000
 
     /// Returns the trimmed answer, or `nil` when it is empty, over-long, or
-    /// carries control, format, or line/paragraph separators. Rejects rather
-    /// than truncates, so a caller can never publish a silently altered answer.
+    /// carries unsafe control, format, or line/paragraph separators. Newlines
+    /// and tabs are allowed, with newline runs capped to one blank line.
     public static func sanitized(_ answer: String) -> String? {
         let trimmed = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         let scalars = trimmed.unicodeScalars
@@ -321,14 +321,29 @@ public enum BrainChatAnswer: Sendable {
         let hasUnsafeScalar = scalars.contains { scalar in
             switch scalar.properties.generalCategory {
             // Cc/Cf cover control and format characters, including zero-width
-            // and bidi overrides. Zl/Zp are neither, but they render as line
-            // breaks, and this surface expects one paragraph.
-            case .control, .format, .lineSeparator, .paragraphSeparator:
+            // and bidi overrides. U+000A and U+0009 are the only display-safe
+            // controls accepted here. Zl/Zp remain unsafe line breaks.
+            case .control:
+                scalar.value != 0x000A && scalar.value != 0x0009
+            case .format, .lineSeparator, .paragraphSeparator:
                 true
             default:
                 false
             }
         }
-        return hasUnsafeScalar ? nil : trimmed
+        guard !hasUnsafeScalar else { return nil }
+
+        var sanitized = ""
+        var consecutiveNewlines = 0
+        for scalar in scalars {
+            if scalar.value == 0x000A {
+                consecutiveNewlines += 1
+                guard consecutiveNewlines <= 2 else { continue }
+            } else {
+                consecutiveNewlines = 0
+            }
+            sanitized.unicodeScalars.append(scalar)
+        }
+        return sanitized
     }
 }

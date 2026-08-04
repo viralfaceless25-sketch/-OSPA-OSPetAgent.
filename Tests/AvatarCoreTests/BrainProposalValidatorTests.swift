@@ -512,4 +512,40 @@ struct BrainProposalValidatorTests {
             )
         }
     }
+
+    // MARK: - Chat answer display safety
+
+    @Test("A two-line chat answer survives sanitization")
+    func allowsTwoLineChatAnswer() {
+        #expect(
+            BrainChatAnswer.sanitized("First line.\nSecond line.")
+                == "First line.\nSecond line."
+        )
+    }
+
+    @Test("A tab inside a chat answer survives sanitization")
+    func allowsTabInChatAnswer() {
+        #expect(
+            BrainChatAnswer.sanitized("Term\tDefinition")
+                == "Term\tDefinition"
+        )
+    }
+
+    @Test("A right-to-left override remains unsafe in a chat answer")
+    func rejectsRightToLeftOverrideInChatAnswer() {
+        #expect(BrainChatAnswer.sanitized("Safe\u{202E}unsafe") == nil)
+    }
+
+    @Test("A null scalar remains unsafe in a chat answer")
+    func rejectsNullInChatAnswer() {
+        #expect(BrainChatAnswer.sanitized("Safe\u{0000}unsafe") == nil)
+    }
+
+    @Test("A chat answer newline flood is capped")
+    func capsChatAnswerNewlineFlood() {
+        #expect(
+            BrainChatAnswer.sanitized("First.\n\n\n\n\nSecond.")
+                == "First.\n\nSecond."
+        )
+    }
 }
