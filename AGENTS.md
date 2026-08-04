@@ -1,10 +1,15 @@
 # OSPA Codex bootstrap
 
-Before doing any work in this repository, read
-`docs/superpowers/CODEX-DECISION-MANUAL.md` from top to bottom. It is the durable
-operating manual for project goals, judgment, safety boundaries, and workflow.
-Treat that document as incorporated here by reference. If it cannot be read, stop
-and report the missing instruction source instead of guessing.
+Before doing any work in this repository, read **both** of these from top to bottom:
+
+1. `docs/superpowers/CODEX-DECISION-MANUAL.md` — the durable operating manual for
+   project goals, judgment, safety boundaries, and workflow. **The rules.**
+2. `docs/superpowers/CLAUDE-DECISION-THINKING.md` — the reasoning that produced those
+   rules, each paired with the incident that produced it. **How to derive a decision
+   the rules do not already cover**, which is now most of them.
+
+Treat both as incorporated here by reference. If either cannot be read, stop and
+report the missing instruction source instead of guessing.
 
 Then establish live state. Do not rely on remembered SHAs, test counts, old handoff
 claims, or a filename that says "plan":

@@ -400,6 +400,11 @@ the step moving.
 
 ## 12. Durable pointers
 
+- **Reasoning companion to this manual:**
+  `docs/superpowers/CLAUDE-DECISION-THINKING.md` — why each rule above exists, and the
+  judgment patterns for decisions this manual does not cover. Read it with this file,
+  not instead of it.
+- Current phase plan: `docs/superpowers/PLAN-2026-08-03-final-push.md`
 - Security guarantees: `SECURITY.md`
 - Architecture: `docs/ARCHITECTURE.md`
 - Sequencing and hard stops: `docs/superpowers/ROADMAP-codex.md`
