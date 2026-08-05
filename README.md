@@ -18,6 +18,7 @@ native opening plus explicit, read-only Accessibility evidence collection.
 - Pure policy layer with Swift Testing coverage
 - Foreground app identification using app name and bundle ID only
 - User-reviewed official-documentation research scope
+- One user-requested page read from an explicitly approved HTTPS host
 - Untrusted research artifact and reviewed-claim boundary
 - Generic capability profiles and foreground computer-use adapter contract
 - App-targeted, expiring, one-shot consent and action plans
@@ -37,13 +38,24 @@ native opening plus explicit, read-only Accessibility evidence collection.
 - Explicitly deferred, non-executable app-specific follow-up goals
 - One-shot, exact-foreground Accessibility UI inspection
 - Bounded, allowlisted, redacted control/action evidence and preview
+- Confirmed real execution of typed visible steps through Accessibility actions
+  and one bounded keyboard chord
 
-No credentials, screen capture, input generation, file-content reads, network
-fetch, shell, AppleScript, or global keyboard monitoring are used. Accessibility
-inspection reads only a bounded allowlist of interactive metadata after two
-explicit user steps; unknown labels are discarded before snapshot storage. Search
-reads only local name/path/type metadata from user-approved scopes. Accessibility
-is checked or requested only after selecting the corresponding button.
+No credentials, screen capture, file-content reads, shell, AppleScript, or global
+keyboard monitoring are used. The only outside-network path reads one URL supplied
+by the user from a live, explicitly approved HTTPS host; it sends no model-selected
+URL and cannot produce an action. Accessibility inspection
+reads only a bounded allowlist of interactive metadata after two explicit user
+steps; unknown labels are discarded before snapshot storage. Search reads only
+local name/path/type metadata from user-approved scopes. Accessibility is checked
+or requested only after selecting the corresponding button.
+
+Input events are generated in exactly one place: a plan the user explicitly
+confirmed, executed under a one-shot contract that expires in 30 seconds. Element
+presses go through `AXUIElementPerformAction` and never through screen
+coordinates; the only synthesized input is a single `CGEvent` keyboard chord from
+a closed key allowlist. Observe-only is still the default, and emergency stop
+still blocks planning and execution. See **Try real execution**.
 
 ## Requirements
 
@@ -84,10 +96,23 @@ identity, hardened runtime, notarization, and a unique bundle identifier.
 4. Select **Prepare research scope**.
 5. Review exact host, five-document cap, 15-minute expiry, and trust warning.
 6. Select **Approve this research scope**.
+7. Enter a question about the same user-supplied URL.
+8. Select **Read approved page**.
 
-Approval is demonstrable state only. No page is fetched in this milestone.
+## Read one approved page
 
-## Try preview-only computer use
+The URL is always yours: the model never chooses a host or follows a link. OSPA
+reads only while the exact host has a live 15-minute authorization. Same-host HTTPS
+redirects may proceed; every other redirect is refused before connection. Responses
+over 2 MiB, extracted text over 20,000 characters, non-text content, and invalid
+UTF-8 are refused.
+
+Fetched text is untrusted and stays in memory only long enough to answer your
+question. Reading never offers, previews, or performs an action. Redacted in-memory
+audit metadata contains request ID, host, outcome, byte count, and timestamp—never
+the URL path or page content.
+
+## Try computer-use planning
 
 1. Identify a foreground app.
 2. Select **Check** to read current Accessibility trust without prompting.
@@ -96,7 +121,107 @@ Approval is demonstrable state only. No page is fetched in this milestone.
 5. Review exact app target, two typed visible steps, and readiness blockers.
 
 The Command-S example is explicitly illustrative, not a learned universal shortcut.
-The preview adapter has no execute method and always reports execution disabled.
+Rendering the plan never runs it: `PreviewOnlyForegroundAdapter` has no execute
+method. Running it requires the separate confirmation below.
+
+## Ask for several things at once
+
+Type one request containing several: `open Safari and open Notes`, or
+`open Safari, open Notes and then switch to Music`. Clauses split on `and`,
+`then`, commas, and semicolons, up to five requests.
+
+1. Turn off **Observe only**.
+2. Type the request and select **Preview**.
+3. Review the numbered list — every step is shown before anything runs.
+4. Select **Confirm and run all N**.
+
+One confirmation authorizes that exact list. The chain is the consent unit, but
+each step still mints its own least-privilege, one-shot, 30-second grant and
+contract when it starts, so a step that never runs never held authority.
+Emergency stop and expiry are re-checked before every step, and the first failure
+stops the rest — the progress list shows exactly how far it got and why it
+stopped.
+
+Every clause must be a supported command or the whole request is refused rather
+than half-run. A request whose later clause is a goal rather than a command —
+`open Netflix and continue playing One Piece` — keeps the existing behavior: the
+first step is executable and the remainder is previewed as an explicitly
+deferred, non-executable goal.
+
+## Talk to it normally
+
+Natural language is off until you turn it on. Prompts, installed-app inventory,
+confidence evaluation, and learned corrections stay on this Mac. The separate,
+explicit **Read approved page** flow sends an HTTP request only to the user-supplied,
+authorized URL and feeds the returned text to the same local model. OSPA lazily
+starts the configured MLX runtime at
+`~/Models/.venv/bin/python`, or safely adopts a compatible server already running
+on `127.0.0.1:8081` without taking ownership of it.
+
+1. Turn on **Natural language**.
+2. Type what you want in ordinary words, for example `i wanna listen to some music`.
+3. Review the preview. It names one exact app and says why it chose it.
+4. Confirm, exactly as you would for a typed command.
+
+Before showing a preview, a separate local evaluator scores how clearly the
+installed app matches the request. Below the 0.65 UX threshold, OSPA publishes no
+action preview and asks you to name or choose the app instead. A high score grants
+no authority: every proposal still passes `BrainProposalValidator` and every normal
+preview, confirmation, expiry, Emergency Stop, and execution check.
+
+OSPA picks the app you actually use, not merely the one whose name matches the
+topic, by reading how often you open each app from macOS itself. It never watches
+you in the background to learn this.
+
+The model only ever chooses from applications installed on this Mac. If it names
+something that is not installed, OSPA refuses the suggestion and tells you the app
+is missing rather than acting on it. Turning natural language on does not grant any
+new ability: it can only reach actions you could already trigger by typing, and each
+one still needs the same explicit confirmation.
+
+If the proposed app is wrong, choose **Not this app**. OSPA records only the
+normalized request shape and rejected installed-app name in the inspectable local
+JSON file `~/Library/Application Support/OSPA/brain-corrections.json`. It keeps at
+most 100 corrections, sends no telemetry, and uses at most eight matching recent
+corrections as negative preference hints. These hints never bypass the installed-app
+inventory or `BrainProposalValidator`.
+
+Use **Clear learned corrections** beside the natural-language status to wipe the
+store. You can also inspect or delete the JSON file directly while OSPA is closed.
+
+## Try real execution
+
+Only this flow generates input events. It stays behind every existing gate.
+
+1. Bring the target app forward and identify it.
+2. Grant Accessibility permission (**Check**, then **Request from macOS** if needed).
+3. Turn off **Observe only**.
+4. Build a plan — `focus this app`, or **Create preview-only ⌘S plan**.
+5. Review the steps and confirm the readiness line reads *permission and
+   foreground target match*.
+6. Select **Confirm and run these steps**.
+
+The button stays disabled unless a plan is pending, no readiness issue is open,
+observe-only is off, emergency stop is clear, and the 60-second preview has not
+expired. Confirming issues a fresh 30-second, one-shot `ExecutionContract`.
+
+`RealForegroundInputAdapter` then re-runs the full preflight itself rather than
+trusting the caller, burns the one-shot consent through `ConsentUseLedger`, and
+re-checks expiry, emergency stop, and exact foreground bundle ID before *every*
+step. Focus drift mid-plan stops the run. Confirming the same plan twice is
+refused: the consent is already spent.
+
+Steps execute by type. `accessibilityPress` resolves the element by role and
+label in the live Accessibility tree, verifies it advertises `AXPress`, and calls
+`AXUIElementPerformAction` — no screen coordinates are ever computed.
+`keyboardShortcut` is the only path that synthesizes input, posting one bounded
+`CGEvent` chord from a closed key allowlist. Activation steps reuse the native
+workspace and generate no events.
+
+Audit records keep outcome shape, contract ID, and plan ID only. Failure reasons
+can name an on-screen control, so they appear in the status line and never in the
+audit record. Accessibility is the only permission required; Input Monitoring is
+not requested, because the app posts events and never taps them.
 
 ## Inspect one exact foreground app
 

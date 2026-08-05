@@ -10,15 +10,19 @@ Avatar Companion starts with zero ambient automation authority.
 - Every side effect has a visible preview and separate confirmation.
 - Emergency stop immediately returns to observe-only mode and clears pending work.
 - Only implemented side effect: writing formatted local time to clipboard.
-- No network client, subprocess execution, persistence agent, credential input,
-  Accessibility API, screen capture, microphone, camera, or file access.
+- No arbitrary shell or AppleScript execution, persistence agent, credential input,
+  screen capture, microphone, or camera access. The current app does use native
+  Accessibility APIs behind explicit gates, starts the configured local MLX Python
+  server as a subprocess, talks to that server over loopback, and has the narrowly
+  bounded page reader described below.
 
 ## Milestone 2 trust boundaries
 
 - Foreground app discovery reads only localized name and bundle identifier.
 - Documentation research requires exact HTTPS host, small document cap, explicit
   approval, and short expiry.
-- Research authorization is demonstrated, but no network fetcher ships yet.
+- One explicitly requested page can be fetched only while that authorization is
+  live; the model never chooses the URL or host.
 - Retrieved content is modeled as untrusted provenance. It cannot define or invoke
   executable behavior.
 - Claims require explicit review before capability profiles may reference them.
@@ -29,6 +33,26 @@ Avatar Companion starts with zero ambient automation authority.
 - Audit events contain contract/plan IDs and redacted outcomes, not raw secrets.
 - At milestone 2, no accessibility-element inspection or keyboard/mouse/window
   event generation ships. Permission request arrives only in milestone 3.
+
+## Approved single-page read boundary
+
+- The user supplies the exact URL. The model is never asked where to connect and
+  cannot select or follow links.
+- The existing `ResearchGate` requires a live explicit authorization, HTTPS, and
+  an exact approved host before the transport is called.
+- Redirects are checked by the URLSession task delegate before they are followed.
+  Only approved-host HTTPS redirects without credentials proceed; the final URL is
+  checked again after response headers arrive.
+- The response is streamed with no cookies, credentials, or persistent cache. It
+  is cancelled and refused above 2 MiB. Extracted text is refused above 20,000
+  characters and is never silently truncated.
+- Only HTML and plain UTF-8 text are accepted. Fetched content is used in memory
+  for one answer and is not stored.
+- The read lane publishes sanitized answer text only. It has no proposal, plan,
+  preview, consent, adapter, or executor path, so page text cannot produce an
+  action even if it contains prompt-injection instructions.
+- Redacted in-memory audit records contain only request ID, host, outcome, byte
+  count, and timestamp—never URL path, query, or page content.
 
 ## Milestone 3 permission and preview boundary
 

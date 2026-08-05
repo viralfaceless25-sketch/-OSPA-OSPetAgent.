@@ -1,0 +1,1607 @@
+import AvatarCore
+import AvatarPlatform
+import Foundation
+import Testing
+
+@testable import AvatarCompanion
+
+private struct FixedUsageSource: ApplicationUsageSource {
+    let inventory: [InstalledApplicationUsage]
+
+    func currentInventory() -> [InstalledApplicationUsage] {
+        inventory
+    }
+}
+
+private actor RecordingBrainService:
+    LocalBrainService, LocalBrainProposalEvaluating
+{
+    enum Behavior: Sendable {
+        case proposal(RawBrainToolCall)
+        case proposals([RawBrainToolCall])
+        case failure(LocalBrainError)
+    }
+
+    private let behavior: Behavior
+    private var requests: [String] = []
+
+    init(_ behavior: Behavior) {
+        self.behavior = behavior
+    }
+
+    func propose(
+        request: String,
+        inventory: [InstalledApplicationUsage]
+    ) async throws -> [RawBrainToolCall] {
+        requests.append(request)
+        switch behavior {
+        case let .proposal(call):
+            return [call]
+        case let .proposals(calls):
+            return calls
+        case let .failure(error):
+            throw error
+        }
+    }
+
+    func requestCount() -> Int {
+        requests.count
+    }
+
+    func evaluate(
+        request: String,
+        proposals: [BrainProposal],
+        inventory: [InstalledApplicationUsage]
+    ) async throws -> BrainProposalConfidence {
+        BrainProposalConfidence(score: 1, alternatives: [])
+    }
+}
+
+private actor CorrectionRecordingBrainService:
+    LocalBrainService, LocalBrainProposalEvaluating
+{
+    private let call: RawBrainToolCall
+    private var receivedCorrections: [[BrainCorrection]] = []
+
+    init(call: RawBrainToolCall) {
+        self.call = call
+    }
+
+    func propose(
+        request: String,
+        inventory: [InstalledApplicationUsage]
+    ) async throws -> [RawBrainToolCall] {
+        [call]
+    }
+
+    func propose(
+        request: String,
+        inventory: [InstalledApplicationUsage],
+        corrections: [BrainCorrection]
+    ) async throws -> [RawBrainToolCall] {
+        receivedCorrections.append(corrections)
+        return [call]
+    }
+
+    func lastCorrections() -> [BrainCorrection]? {
+        receivedCorrections.last
+    }
+
+    func evaluate(
+        request: String,
+        proposals: [BrainProposal],
+        inventory: [InstalledApplicationUsage]
+    ) async throws -> BrainProposalConfidence {
+        BrainProposalConfidence(score: 1, alternatives: [])
+    }
+}
+
+private actor RecordingCorrectionStore: BrainCorrectionStoring {
+    private var records: [BrainCorrection] = []
+
+    func recordDecline(
+        request: String,
+        rejectedApplicationName: String
+    ) async throws {
+        guard let shape = BrainRequestShape.canonical(request) else { return }
+        records.append(
+            BrainCorrection(
+                requestShape: shape,
+                rejectedApplicationName: rejectedApplicationName,
+                declinedAt: Date(timeIntervalSince1970: TimeInterval(records.count))
+            )
+        )
+    }
+
+    func recentCorrections(
+        for request: String,
+        installedApplicationNames: Set<String>,
+        limit: Int
+    ) async -> [BrainCorrection] {
+        guard let shape = BrainRequestShape.canonical(request) else { return [] }
+        return records.reversed().filter {
+            $0.requestShape == shape
+                && installedApplicationNames.contains(
+                    $0.rejectedApplicationName
+                )
+        }.prefix(limit).map { $0 }
+    }
+
+    func allCorrections() async -> [BrainCorrection] {
+        records
+    }
+
+    func clear() async throws {
+        records = []
+    }
+}
+
+private actor ControlledBrainService:
+    LocalBrainService, LocalBrainProposalEvaluating
+{
+    private var continuation: CheckedContinuation<[RawBrainToolCall], Never>?
+    private var started = false
+
+    func propose(
+        request: String,
+        inventory: [InstalledApplicationUsage]
+    ) async throws -> [RawBrainToolCall] {
+        started = true
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func hasStarted() -> Bool {
+        started
+    }
+
+    func finishAfterCancellation(
+        returning calls: [RawBrainToolCall] = [
+            RawBrainToolCall(
+                toolName: "no_supported_action",
+                argumentsJSON: #"{"reason":"Late result must be ignored."}"#
+            )
+        ]
+    ) {
+        continuation?.resume(
+            returning: calls
+        )
+        continuation = nil
+    }
+
+    func evaluate(
+        request: String,
+        proposals: [BrainProposal],
+        inventory: [InstalledApplicationUsage]
+    ) async throws -> BrainProposalConfidence {
+        BrainProposalConfidence(score: 1, alternatives: [])
+    }
+}
+
+private actor RecordingIntentRouter: LocalBrainIntentRouting {
+    enum Behavior: Sendable {
+        case lane(LocalBrainIntentLane)
+        case failure(LocalBrainError)
+    }
+
+    private let behavior: Behavior
+    private var requests: [String] = []
+
+    init(_ behavior: Behavior) {
+        self.behavior = behavior
+    }
+
+    func route(request: String) async throws -> LocalBrainIntentLane {
+        requests.append(request)
+        switch behavior {
+        case let .lane(lane):
+            return lane
+        case let .failure(error):
+            throw error
+        }
+    }
+
+    func requestCount() -> Int {
+        requests.count
+    }
+}
+
+private actor ControlledIntentRouter: LocalBrainIntentRouting {
+    private var continuation: CheckedContinuation<LocalBrainIntentLane, Never>?
+    private var started = false
+
+    func route(request: String) async throws -> LocalBrainIntentLane {
+        started = true
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func hasStarted() -> Bool {
+        started
+    }
+
+    func finishAfterCancellation(returning lane: LocalBrainIntentLane) {
+        continuation?.resume(returning: lane)
+        continuation = nil
+    }
+}
+
+private struct FixedChatService: LocalBrainChatService {
+    let response: String
+
+    func answer(request: String) async throws -> String {
+        response
+    }
+}
+
+private actor ControlledChatService: LocalBrainChatService {
+    private var continuation: CheckedContinuation<String, Never>?
+    private var started = false
+
+    func answer(request: String) async throws -> String {
+        started = true
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func hasStarted() -> Bool {
+        started
+    }
+
+    func finishAfterCancellation(returning response: String) {
+        continuation?.resume(returning: response)
+        continuation = nil
+    }
+}
+
+private actor RecordingProposalEvaluator: LocalBrainProposalEvaluating {
+    enum Behavior: Sendable {
+        case confidence(BrainProposalConfidence)
+        case failure(LocalBrainError)
+    }
+
+    private let behavior: Behavior
+    private var receivedProposals: [[BrainProposal]] = []
+
+    init(_ behavior: Behavior) {
+        self.behavior = behavior
+    }
+
+    func evaluate(
+        request: String,
+        proposals: [BrainProposal],
+        inventory: [InstalledApplicationUsage]
+    ) async throws -> BrainProposalConfidence {
+        receivedProposals.append(proposals)
+        switch behavior {
+        case let .confidence(confidence): return confidence
+        case let .failure(error): throw error
+        }
+    }
+
+    func requestCount() -> Int {
+        receivedProposals.count
+    }
+}
+
+private actor ControlledProposalEvaluator: LocalBrainProposalEvaluating {
+    private var continuation: CheckedContinuation<BrainProposalConfidence, Never>?
+    private var started = false
+
+    func evaluate(
+        request: String,
+        proposals: [BrainProposal],
+        inventory: [InstalledApplicationUsage]
+    ) async throws -> BrainProposalConfidence {
+        started = true
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func hasStarted() -> Bool {
+        started
+    }
+
+    func finishAfterCancellation(
+        returning confidence: BrainProposalConfidence
+    ) {
+        continuation?.resume(returning: confidence)
+        continuation = nil
+    }
+}
+
+/// Thread-safe counters for observing controller closures, which run outside
+/// the actor. Locked rather than `@unchecked Sendable` with bare mutation.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.withLock { count }
+    }
+
+    func increment() {
+        lock.withLock { count += 1 }
+    }
+}
+
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+
+    var isSet: Bool {
+        lock.withLock { flag }
+    }
+
+    func set() {
+        lock.withLock { flag = true }
+    }
+}
+
+private func readyServerController() -> LocalBrainServerController {
+    LocalBrainServerController(
+        launch: {},
+        terminate: {},
+        isHealthy: { true },
+        now: { Date(timeIntervalSince1970: 1_000_000) },
+        startupTimeout: 0,
+        idleShutdownInterval: 300
+    )
+}
+
+@MainActor
+private func waitUntil(
+    _ condition: @MainActor () -> Bool
+) async {
+    for _ in 0..<200 {
+        if condition() { return }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+    }
+    Issue.record("Timed out waiting for AvatarModel state")
+}
+
+@Suite("Avatar model local brain")
+@MainActor
+struct AvatarModelBrainTests {
+    private let inventory = [
+        InstalledApplicationUsage(
+            displayName: "Test App", openCount: 10, lastUsedDaysAgo: 0
+        )
+    ]
+
+    private func exactInstalledApplications(
+        count: Int
+    ) throws -> [ResolvedApplication] {
+        let resolver = InstalledApplicationResolver()
+        var applications: [ResolvedApplication] = []
+
+        for candidate in resolver.currentIndex().sorted(by: {
+            $0.identity.displayName < $1.identity.displayName
+        }) {
+            guard
+                let resolved = try? resolver.resolveExact(
+                    named: candidate.identity.displayName
+                ),
+                resolved.applicationURL.standardizedFileURL
+                    == candidate.applicationURL.standardizedFileURL,
+                !applications.contains(where: {
+                    $0.identity == candidate.identity
+                })
+            else {
+                continue
+            }
+            applications.append(candidate)
+            if applications.count == count { return applications }
+        }
+
+        Issue.record("Need \(count) uniquely resolvable installed applications")
+        return []
+    }
+
+    private func brainApplicationModel(
+        target: ResolvedApplication,
+        reason: String
+    ) -> AvatarModel {
+        let usage = InstalledApplicationUsage(
+            displayName: target.identity.displayName,
+            openCount: 10,
+            lastUsedDaysAgo: 0
+        )
+        let service = RecordingBrainService(
+            .proposal(
+                RawBrainToolCall(
+                    toolName: "open_application",
+                    argumentsJSON:
+                        #"{"name":"\#(target.identity.displayName)","reason":"\#(reason)"}"#
+                )
+            )
+        )
+        return AvatarModel(
+            usageSource: FixedUsageSource(inventory: [usage]),
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainServerController: readyServerController()
+        )
+    }
+
+    private func rawApplicationCall(
+        toolName: String = "open_application",
+        target: ResolvedApplication,
+        reason: String
+    ) throws -> RawBrainToolCall {
+        let data = try JSONSerialization.data(
+            withJSONObject: [
+                "name": target.identity.displayName,
+                "reason": reason,
+            ],
+            options: [.sortedKeys]
+        )
+        return RawBrainToolCall(
+            toolName: toolName,
+            argumentsJSON: try #require(String(data: data, encoding: .utf8))
+        )
+    }
+
+    private func brainModel(
+        applications: [ResolvedApplication],
+        calls: [RawBrainToolCall]
+    ) -> AvatarModel {
+        AvatarModel(
+            usageSource: FixedUsageSource(
+                inventory: applications.map {
+                    InstalledApplicationUsage(
+                        displayName: $0.identity.displayName,
+                        openCount: 10,
+                        lastUsedDaysAgo: 0
+                    )
+                }
+            ),
+            brainService: RecordingBrainService(.proposals(calls)),
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainServerController: readyServerController()
+        )
+    }
+
+    private func previewBrainApplication(
+        with model: AvatarModel
+    ) async {
+        model.setBrainEnabled(true)
+        model.command = "choose the best application for this unusual request"
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+    }
+
+    @Test("Plain language reaches the brain only after deterministic parsers decline")
+    func usesBrainFallback() async {
+        let service = RecordingBrainService(
+            .proposal(
+                RawBrainToolCall(
+                    toolName: "no_supported_action",
+                    argumentsJSON: #"{"reason":"No installed app can do that."}"#
+                )
+            )
+        )
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "do something unusual"
+
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        #expect(await service.requestCount() == 1)
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus == "No installed app can do that.")
+        #expect(model.pendingApplicationProposal == nil)
+    }
+
+    @Test("A weather request is refused honestly without an app proposal")
+    func weatherRoutesToUnsupported() async {
+        let service = RecordingBrainService(.failure(.unavailable))
+        let router = RecordingIntentRouter(.lane(.unsupported))
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: router,
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "what's the weather in Tokyo"
+
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        #expect(await router.requestCount() == 1)
+        #expect(await service.requestCount() == 0)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(
+            model.brainStatus
+                == "I can’t browse the web or use current online information yet. I can open or switch Mac apps, or chat about things that don’t need current information."
+        )
+    }
+
+    @Test("The chat lane publishes text but no action")
+    func chatLanePublishesNoAction() async {
+        let service = RecordingBrainService(.failure(.unavailable))
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.chat)),
+            brainChatService: FixedChatService(
+                response: "Photosynthesis turns light into stored chemical energy."
+            ),
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "explain photosynthesis"
+
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        #expect(await service.requestCount() == 0)
+        #expect(
+            model.brainStatus
+                == "Photosynthesis turns light into stored chemical energy."
+        )
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.previewedAction == nil)
+    }
+
+    /// The chat client is untrusted exactly like the proposal client, so the
+    /// display bound has to hold at the publication point too — not only inside
+    /// the transport that a swapped or injected service bypasses entirely.
+    @Test(
+        "Unsafe chat text is refused at the model layer, not just in transport",
+        arguments: [
+            String(repeating: "a", count: 2_001),
+            "Answer with a bidi override \u{202E} in it.",
+            "Answer with a null \u{0000} in it.",
+            "Answer split\u{2028}across separators.",
+        ]
+    )
+    func unsafeChatTextNeverPublishes(unsafe: String) async {
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: RecordingBrainService(.failure(.unavailable)),
+            brainIntentRouter: RecordingIntentRouter(.lane(.chat)),
+            brainChatService: FixedChatService(response: unsafe),
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "tell me something"
+
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        #expect(model.brainStatus != unsafe)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.previewedAction == nil)
+    }
+
+    /// A cancelled request must still arm the idle timer, or the resident
+    /// multi-gigabyte model server leaks until the app quits.
+    ///
+    /// Emergency Stop and the brain toggle are NOT valid ways to test this —
+    /// both call `shutdown()` outright, so they pass whether or not the arming
+    /// happens. This uses a plain re-preview, which cancels through
+    /// `cancelBrainProposal()` and shuts nothing down explicitly, and observes
+    /// the controller's own `terminate` closure.
+    @Test("A request cancelled without an explicit shutdown still releases the server")
+    func cancelledRoutingStillArmsIdleShutdown() async throws {
+        let terminations = Counter()
+        // Unhealthy until launched, so the controller owns the process and
+        // shutdown() is actually allowed to terminate it.
+        let launched = Flag()
+        let controller = LocalBrainServerController(
+            launch: { launched.set() },
+            terminate: { terminations.increment() },
+            isHealthy: { launched.isSet },
+            now: { Date() },
+            startupTimeout: 5,
+            idleShutdownInterval: 0
+        )
+        let router = ControlledIntentRouter()
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: RecordingBrainService(.failure(.unavailable)),
+            brainIntentRouter: router,
+            brainServerController: controller,
+            brainIdleShutdownInterval: 0
+        )
+        model.isBrainEnabled = true
+        model.command = "what's the weather in Tokyo"
+
+        model.previewCommand()
+        for _ in 0..<500 {
+            if await router.hasStarted() { break }
+            await Task.yield()
+        }
+        #expect(await router.hasStarted())
+
+        // Cancel the way a search selection or a fresh preview does: no
+        // explicit server shutdown anywhere on this path.
+        model.command = "open Finder"
+        model.previewCommand()
+        await router.finishAfterCancellation(returning: .nativeApp)
+
+        for _ in 0..<500 {
+            if terminations.value > 0 { break }
+            await Task.yield()
+        }
+        #expect(terminations.value > 0)
+        #expect(model.pendingTaskSequence == nil)
+    }
+
+    @Test("The native app lane still refuses an invalid model tool")
+    func nativeLaneStillUsesProposalValidator() async {
+        let service = RecordingBrainService(
+            .proposal(
+                RawBrainToolCall(
+                    toolName: "run_shell",
+                    argumentsJSON: #"{"reason":"Must be refused."}"#
+                )
+            )
+        )
+        let router = RecordingIntentRouter(.lane(.nativeApp))
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: router,
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "run something for me"
+
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        #expect(await router.requestCount() == 1)
+        #expect(await service.requestCount() == 1)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.brainStatus.contains("not allowed"))
+    }
+
+    @Test("Disabling natural language ignores a late router result")
+    func disablingBrainCancelsIntentRouting() async {
+        let service = RecordingBrainService(.failure(.unavailable))
+        let router = ControlledIntentRouter()
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: router,
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "choose an app"
+
+        model.previewCommand()
+        for _ in 0..<200 {
+            if await router.hasStarted() { break }
+            await Task.yield()
+        }
+        #expect(await router.hasStarted())
+        model.setBrainEnabled(false)
+        await router.finishAfterCancellation(returning: .nativeApp)
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(await service.requestCount() == 0)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.brainStatus == "Natural language is off. Type exact commands.")
+    }
+
+    @Test("Emergency Stop ignores a late chat answer")
+    func emergencyStopCancelsChat() async {
+        let chat = ControlledChatService()
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: RecordingBrainService(.failure(.unavailable)),
+            brainIntentRouter: RecordingIntentRouter(.lane(.chat)),
+            brainChatService: chat,
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "tell me something"
+
+        model.previewCommand()
+        for _ in 0..<200 {
+            if await chat.hasStarted() { break }
+            await Task.yield()
+        }
+        #expect(await chat.hasStarted())
+        model.emergencyStop()
+        await chat.finishAfterCancellation(returning: "Late text must be ignored.")
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.brainStatus == "Emergency stop active. Thinking cancelled.")
+    }
+
+    @Test("A brain chain previews every validated step in model order")
+    func previewsOrderedBrainChain() async throws {
+        let applications = try exactInstalledApplications(count: 2)
+        let first = try #require(applications.first)
+        let second = try #require(applications.dropFirst().first)
+        let firstReason = "Start with the first requested application."
+        let secondReason = "Then open the second requested application."
+        let model = brainModel(
+            applications: applications,
+            calls: [
+                try rawApplicationCall(target: first, reason: firstReason),
+                try rawApplicationCall(target: second, reason: secondReason),
+            ]
+        )
+
+        await previewBrainApplication(with: model)
+
+        let sequence = try #require(model.pendingTaskSequence)
+        #expect(sequence.steps.count == 2)
+        #expect(
+            sequence.steps.map(\.summary)
+                == [
+                    "Open \(first.identity.displayName) — \(firstReason)",
+                    "Open \(second.identity.displayName) — \(secondReason)",
+                ]
+        )
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.brainReason == nil)
+    }
+
+    @Test("An invalid later brain call publishes no valid prefix")
+    func invalidLaterCallRefusesWholeChain() async throws {
+        let applications = try exactInstalledApplications(count: 1)
+        let first = try #require(applications.first)
+        let model = brainModel(
+            applications: applications,
+            calls: [
+                try rawApplicationCall(
+                    target: first,
+                    reason: "This valid prefix must never be published alone."
+                ),
+                RawBrainToolCall(
+                    toolName: "run_shell",
+                    argumentsJSON: #"{"reason":"unsafe"}"#
+                ),
+            ]
+        )
+
+        await previewBrainApplication(with: model)
+
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.pendingApplicationProposal == nil)
+    }
+
+    @Test("An unsupported link refuses every executable link in the chain")
+    func unsupportedLinkRefusesWholeChain() async throws {
+        let applications = try exactInstalledApplications(count: 1)
+        let first = try #require(applications.first)
+        let model = brainModel(
+            applications: applications,
+            calls: [
+                try rawApplicationCall(
+                    target: first,
+                    reason: "This app could satisfy only the first part."
+                ),
+                RawBrainToolCall(
+                    toolName: "no_supported_action",
+                    argumentsJSON:
+                        #"{"reason":"Nothing installed can do the second part."}"#
+                ),
+            ]
+        )
+
+        await previewBrainApplication(with: model)
+
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(
+            model.brainStatus
+                == "I couldn’t prepare every requested step, so nothing was prepared."
+        )
+    }
+
+    @Test("Disabling the brain clears its pending chain")
+    func disablingBrainClearsPendingChain() async throws {
+        let applications = try exactInstalledApplications(count: 2)
+        let first = try #require(applications.first)
+        let second = try #require(applications.dropFirst().first)
+        let model = brainModel(
+            applications: applications,
+            calls: [
+                try rawApplicationCall(target: first, reason: "First step."),
+                try rawApplicationCall(target: second, reason: "Second step."),
+            ]
+        )
+
+        await previewBrainApplication(with: model)
+        _ = try #require(model.pendingTaskSequence)
+
+        model.setBrainEnabled(false)
+
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus == "Natural language is off. Type exact commands.")
+    }
+
+    @Test("An expired brain chain clears its owned status with the preview")
+    func expiredBrainChainClearsStatus() async throws {
+        let applications = try exactInstalledApplications(count: 2)
+        let first = try #require(applications.first)
+        let second = try #require(applications.dropFirst().first)
+        let model = brainModel(
+            applications: applications,
+            calls: [
+                try rawApplicationCall(target: first, reason: "First step."),
+                try rawApplicationCall(target: second, reason: "Second step."),
+            ]
+        )
+
+        await previewBrainApplication(with: model)
+        let sequence = try #require(model.pendingTaskSequence)
+        model.pendingTaskSequence = TaskSequence(
+            id: sequence.id,
+            steps: sequence.steps,
+            createdAt: sequence.createdAt,
+            expiresAt: .distantPast
+        )
+        await waitUntil { model.pendingTaskSequence == nil }
+
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.status == "That request expired. Ask again.")
+        #expect(model.taskSequenceStatus == "That request expired. Ask again.")
+        #expect(
+            model.brainStatus
+                == "Natural language is on. Type what you want in ordinary words."
+        )
+    }
+
+    @Test("Selecting a search result replaces a completed brain chain")
+    func searchReplacementClearsBrainChain() async throws {
+        let applications = try exactInstalledApplications(count: 3)
+        let first = try #require(applications.first)
+        let second = try #require(applications.dropFirst().first)
+        let searchTarget = try #require(applications.dropFirst(2).first)
+        let model = brainModel(
+            applications: applications,
+            calls: [
+                try rawApplicationCall(target: first, reason: "First step."),
+                try rawApplicationCall(target: second, reason: "Second step."),
+            ]
+        )
+
+        await previewBrainApplication(with: model)
+        _ = try #require(model.pendingTaskSequence)
+
+        model.openSearch()
+        model.approveSearchScopes()
+        await waitUntil { model.searchStatus.hasPrefix("Ready.") }
+        model.updateSearchQuery(searchTarget.identity.displayName)
+        await waitUntil {
+            model.searchCandidates.contains {
+                $0.item.url.standardizedFileURL
+                    == searchTarget.applicationURL.standardizedFileURL
+            }
+        }
+        let replacement = try #require(
+            model.searchCandidates.first {
+                $0.item.url.standardizedFileURL
+                    == searchTarget.applicationURL.standardizedFileURL
+            }
+        )
+        model.selectSearchCandidate(replacement)
+
+        #expect(model.pendingTaskSequence == nil)
+        #expect(
+            model.pendingApplicationProposal?.application.identity
+                == searchTarget.identity
+        )
+    }
+
+    @Test("A late brain result cannot replace a selected search result")
+    func searchReplacementCancelsInFlightBrain() async throws {
+        let applications = try exactInstalledApplications(count: 2)
+        let brainTarget = try #require(applications.first)
+        let searchTarget = try #require(applications.dropFirst().first)
+        let service = ControlledBrainService()
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(
+                inventory: applications.map {
+                    InstalledApplicationUsage(
+                        displayName: $0.identity.displayName,
+                        openCount: 10,
+                        lastUsedDaysAgo: 0
+                    )
+                }
+            ),
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainServerController: readyServerController()
+        )
+        model.setBrainEnabled(true)
+        model.command = "choose an app for this unusual request"
+        model.previewCommand()
+        for _ in 0..<200 {
+            if await service.hasStarted() { break }
+            await Task.yield()
+        }
+        #expect(await service.hasStarted())
+
+        model.openSearch()
+        model.approveSearchScopes()
+        await waitUntil { model.searchStatus.hasPrefix("Ready.") }
+        model.updateSearchQuery(searchTarget.identity.displayName)
+        await waitUntil {
+            model.searchCandidates.contains {
+                $0.item.url.standardizedFileURL
+                    == searchTarget.applicationURL.standardizedFileURL
+            }
+        }
+        let replacement = try #require(
+            model.searchCandidates.first {
+                $0.item.url.standardizedFileURL
+                    == searchTarget.applicationURL.standardizedFileURL
+            }
+        )
+        model.selectSearchCandidate(replacement)
+        let selectedPlanID = try #require(model.pendingApplicationProposal?.plan.id)
+
+        await service.finishAfterCancellation(
+            returning: [
+                try rawApplicationCall(
+                    target: brainTarget,
+                    reason: "This late result must be ignored."
+                )
+            ]
+        )
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(model.pendingApplicationProposal?.plan.id == selectedPlanID)
+        #expect(
+            model.pendingApplicationProposal?.application.identity
+                == searchTarget.identity
+        )
+    }
+
+    @Test("Exact typed commands never reach the brain")
+    func deterministicCommandSkipsBrain() async {
+        let service = RecordingBrainService(
+            .failure(.unavailable)
+        )
+        let router = RecordingIntentRouter(.lane(.nativeApp))
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: router,
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "open Safari"
+
+        model.previewCommand()
+        await Task.yield()
+
+        #expect(await service.requestCount() == 0)
+        #expect(await router.requestCount() == 0)
+        #expect(!model.isBrainThinking)
+        #expect(model.brainReason == nil)
+        #expect(
+            model.brainStatus
+                == "Natural language is on. Type what you want in ordinary words."
+        )
+    }
+
+    @Test("Deterministic foreground composition stays ahead of the brain")
+    func foregroundComposerSkipsBrain() async {
+        let service = RecordingBrainService(.failure(.unavailable))
+        let router = RecordingIntentRouter(.lane(.nativeApp))
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: router,
+            brainServerController: readyServerController(),
+            frontmostBundleIdentifier: { "com.ospa.test.editor" }
+        )
+        model.isBrainEnabled = true
+        model.discoveredApp = AppIdentity(
+            bundleIdentifier: "com.ospa.test.editor",
+            displayName: "Test Editor"
+        )
+        model.command = "Please focus this app"
+
+        model.previewCommand()
+        await Task.yield()
+
+        #expect(await service.requestCount() == 0)
+        #expect(await router.requestCount() == 0)
+        #expect(model.computerUsePreview != nil)
+        #expect(!model.isBrainThinking)
+    }
+
+    @Test("Brain failures use plain language and leave no proposal")
+    func unavailableMessage() async {
+        let service = RecordingBrainService(.failure(.unavailable))
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "help me choose an app"
+
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        #expect(model.brainStatus == "I can’t think right now. You can still type an exact command.")
+        #expect(model.pendingApplicationProposal == nil)
+    }
+
+    @Test("Emergency stop cancels in-flight brain work")
+    func emergencyStopCancelsBrain() async {
+        let service = ControlledBrainService()
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "keep thinking"
+
+        model.previewCommand()
+        for _ in 0..<200 {
+            if await service.hasStarted() { break }
+            await Task.yield()
+        }
+        #expect(await service.hasStarted())
+        model.emergencyStop()
+        await service.finishAfterCancellation()
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(!model.isBrainThinking)
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus == "Emergency stop active. Thinking cancelled.")
+        #expect(model.pendingApplicationProposal == nil)
+
+        model.resumeObservation()
+        #expect(
+            model.brainStatus
+                == "Natural language is on. Type what you want in ordinary words."
+        )
+    }
+
+    @Test("Selecting a different app cannot retain a brain proposal's reason")
+    func searchReplacementClearsBrainReason() async throws {
+        let applications = try exactInstalledApplications(count: 2)
+        let brainTarget = try #require(applications.first)
+        let searchTarget = try #require(applications.dropFirst().first)
+        let reason = "This reason belongs only to the first application."
+        let model = brainApplicationModel(target: brainTarget, reason: reason)
+
+        await previewBrainApplication(with: model)
+        #expect(
+            model.pendingApplicationProposal?.application.identity
+                == brainTarget.identity
+        )
+        #expect(model.brainReason == reason)
+
+        model.openSearch()
+        model.approveSearchScopes()
+        await waitUntil { model.searchStatus.hasPrefix("Ready.") }
+        model.updateSearchQuery(searchTarget.identity.displayName)
+        await waitUntil {
+            model.searchCandidates.contains {
+                $0.item.url.standardizedFileURL
+                    == searchTarget.applicationURL.standardizedFileURL
+            }
+        }
+        let replacement = try #require(
+            model.searchCandidates.first {
+                $0.item.url.standardizedFileURL
+                    == searchTarget.applicationURL.standardizedFileURL
+            }
+        )
+        model.selectSearchCandidate(replacement)
+
+        #expect(
+            model.pendingApplicationProposal?.application.identity
+                == searchTarget.identity
+        )
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus != reason)
+    }
+
+    @Test("Disabling the brain clears its confirmable proposal and reason together")
+    func disablingBrainClearsPublishedProposal() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let reason = "This reason is bound to the brain proposal."
+        let model = brainApplicationModel(target: target, reason: reason)
+
+        await previewBrainApplication(with: model)
+        #expect(model.pendingApplicationProposal != nil)
+        #expect(model.brainReason == reason)
+
+        model.setBrainEnabled(false)
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.applicationProposalExpiresAt == nil)
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus == "Natural language is off. Type exact commands.")
+    }
+
+    @Test("An expired brain proposal loses its reason when it stops being confirmable")
+    func expiryClearsBrainReason() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let reason = "This reason expires with its proposal."
+        let model = brainApplicationModel(target: target, reason: reason)
+
+        await previewBrainApplication(with: model)
+        #expect(model.pendingApplicationProposal != nil)
+        #expect(model.brainReason == reason)
+
+        model.applicationProposalExpiresAt = .distantPast
+        model.confirmApplicationAction()
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus != reason)
+    }
+
+    @Test("Emergency stop clears a completed brain proposal and its reason")
+    func emergencyStopClearsPublishedProposal() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let reason = "This reason ends with Emergency Stop."
+        let model = brainApplicationModel(target: target, reason: reason)
+
+        await previewBrainApplication(with: model)
+        #expect(model.pendingApplicationProposal != nil)
+        #expect(model.brainReason == reason)
+
+        model.emergencyStop()
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.applicationProposalExpiresAt == nil)
+        #expect(model.brainReason == nil)
+        #expect(model.brainStatus == "Emergency stop active. Thinking cancelled.")
+    }
+
+    @Test("Declining a brain proposal records feedback and feeds the next matching request")
+    func decliningBrainProposalRecordsCorrection() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let request = "Play some music, please!"
+        let store = RecordingCorrectionStore()
+        let service = CorrectionRecordingBrainService(
+            call: try rawApplicationCall(
+                target: target,
+                reason: "This is the installed music app I selected."
+            )
+        )
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(
+                inventory: [
+                    InstalledApplicationUsage(
+                        displayName: target.identity.displayName,
+                        openCount: 10,
+                        lastUsedDaysAgo: 0
+                    )
+                ]
+            ),
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainServerController: readyServerController(),
+            brainCorrectionStore: store
+        )
+
+        model.setBrainEnabled(true)
+        model.command = request
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+        #expect(model.pendingApplicationProposal != nil)
+        #expect(model.brainReason != nil)
+
+        model.declineApplicationAction()
+        await waitUntil {
+            model.brainCorrectionStatus.hasPrefix("Learned correction stored")
+        }
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.applicationProposalExpiresAt == nil)
+        #expect(model.brainReason == nil)
+        let recorded = try #require(await store.allCorrections().first)
+        #expect(recorded.requestShape == "play some music please")
+        #expect(recorded.rejectedApplicationName == target.identity.displayName)
+
+        model.command = "  PLAY some music please  "
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        let supplied = try #require(await service.lastCorrections())
+        #expect(supplied.count == 1)
+        #expect(supplied.first == recorded)
+        #expect(model.pendingApplicationProposal != nil)
+    }
+
+    @Test("Declining a typed proposal does not train the brain")
+    func decliningTypedProposalDoesNotRecordCorrection() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let store = RecordingCorrectionStore()
+        let model = AvatarModel(
+            brainCorrectionStore: store
+        )
+
+        model.command = "open \(target.identity.displayName)"
+        model.previewCommand()
+        #expect(model.pendingApplicationProposal != nil)
+
+        model.declineApplicationAction()
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.applicationProposalExpiresAt == nil)
+        #expect(await store.allCorrections().isEmpty)
+    }
+
+    @Test("Expiry and Emergency Stop never record implicit corrections")
+    func implicitProposalEndingsDoNotRecordCorrections() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let store = RecordingCorrectionStore()
+        let reason = "A valid brain reason."
+        let usage = FixedUsageSource(
+            inventory: [
+                InstalledApplicationUsage(
+                    displayName: target.identity.displayName,
+                    openCount: 10,
+                    lastUsedDaysAgo: 0
+                )
+            ]
+        )
+        let service = RecordingBrainService(
+            .proposal(try rawApplicationCall(target: target, reason: reason))
+        )
+        let model = AvatarModel(
+            usageSource: usage,
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainServerController: readyServerController(),
+            brainCorrectionStore: store
+        )
+
+        await previewBrainApplication(with: model)
+        model.applicationProposalExpiresAt = Date.distantPast
+        model.confirmApplicationAction()
+        #expect(await store.allCorrections().isEmpty)
+
+        await previewBrainApplication(with: model)
+        model.emergencyStop()
+        #expect(await store.allCorrections().isEmpty)
+    }
+
+    @Test("Learned corrections can be cleared explicitly")
+    func clearBrainCorrections() async throws {
+        let store = RecordingCorrectionStore()
+        try await store.recordDecline(
+            request: "play music",
+            rejectedApplicationName: "Music"
+        )
+        let model = AvatarModel(brainCorrectionStore: store)
+
+        model.clearBrainCorrections()
+        await waitUntil {
+            model.brainCorrectionStatus == "Learned corrections cleared."
+        }
+
+        #expect(model.brainCorrectionStatus == "Learned corrections cleared.")
+    }
+
+    @Test("Invalid model output never reaches the confidence evaluator")
+    func validationPrecedesConfidenceEvaluation() async {
+        let evaluator = RecordingProposalEvaluator(
+            .confidence(BrainProposalConfidence(score: 1, alternatives: []))
+        )
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: inventory),
+            brainService: RecordingBrainService(
+                .proposal(
+                    RawBrainToolCall(
+                        toolName: "run_shell",
+                        argumentsJSON: #"{"reason":"Must be refused."}"#
+                    )
+                )
+            ),
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainProposalEvaluator: evaluator,
+            brainServerController: readyServerController()
+        )
+        model.isBrainEnabled = true
+        model.command = "run something"
+
+        model.previewCommand()
+        await waitUntil { !model.isBrainThinking }
+
+        #expect(await evaluator.requestCount() == 0)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.brainStatus.contains("not allowed"))
+    }
+
+    @Test("Low confidence asks with grounded alternatives and publishes no preview")
+    func lowConfidenceAsksForDisambiguation() async throws {
+        let applications = try exactInstalledApplications(count: 3)
+        let proposed = try #require(applications.first)
+        let firstAlternative = try #require(applications.dropFirst().first)
+        let secondAlternative = try #require(applications.dropFirst(2).first)
+        let service = RecordingBrainService(
+            .proposal(
+                try rawApplicationCall(
+                    target: proposed,
+                    reason: "This was only a guess."
+                )
+            )
+        )
+        let evaluator = RecordingProposalEvaluator(
+            .confidence(
+                BrainProposalConfidence(
+                    score: 0.64,
+                    alternatives: [
+                        firstAlternative.identity.displayName,
+                        secondAlternative.identity.displayName,
+                    ]
+                )
+            )
+        )
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(
+                inventory: applications.map {
+                    InstalledApplicationUsage(
+                        displayName: $0.identity.displayName,
+                        openCount: 10,
+                        lastUsedDaysAgo: 0
+                    )
+                }
+            ),
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainProposalEvaluator: evaluator,
+            brainServerController: readyServerController()
+        )
+
+        await previewBrainApplication(with: model)
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.brainReason == nil)
+        #expect(
+            model.brainStatus
+                == "Did you mean \(proposed.identity.displayName), \(firstAlternative.identity.displayName), or \(secondAlternative.identity.displayName)? Please say which app."
+        )
+    }
+
+    @Test("Low confidence without alternatives asks for an app name")
+    func lowConfidenceWithoutAlternativesAsksForName() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(
+                inventory: [
+                    InstalledApplicationUsage(
+                        displayName: target.identity.displayName,
+                        openCount: 10,
+                        lastUsedDaysAgo: 0
+                    )
+                ]
+            ),
+            brainService: RecordingBrainService(
+                .proposal(
+                    try rawApplicationCall(
+                        target: target,
+                        reason: "This was only a guess."
+                    )
+                )
+            ),
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainProposalEvaluator: RecordingProposalEvaluator(
+                .confidence(
+                    BrainProposalConfidence(score: 0.2, alternatives: [])
+                )
+            ),
+            brainServerController: readyServerController()
+        )
+
+        await previewBrainApplication(with: model)
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.brainStatus == "I’m not sure which app you mean. Please name it.")
+    }
+
+    @Test("High confidence still enters the unchanged preview and confirmation path")
+    func highConfidencePublishesNormalPreview() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let reason = "The validated proposal still explains its choice."
+        let usage = InstalledApplicationUsage(
+            displayName: target.identity.displayName,
+            openCount: 10,
+            lastUsedDaysAgo: 0
+        )
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: [usage]),
+            brainService: RecordingBrainService(
+                .proposal(try rawApplicationCall(target: target, reason: reason))
+            ),
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainProposalEvaluator: RecordingProposalEvaluator(
+                .confidence(
+                    BrainProposalConfidence(score: 0.65, alternatives: [])
+                )
+            ),
+            brainServerController: readyServerController()
+        )
+
+        await previewBrainApplication(with: model)
+
+        #expect(model.pendingApplicationProposal != nil)
+        #expect(model.applicationProposalExpiresAt != nil)
+        #expect(model.brainReason == reason)
+        #expect(model.safety.observeOnly)
+    }
+
+    @Test("Evaluator failure and a late cancelled score publish no proposal")
+    func evaluatorFailureAndCancellationFailClosed() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let usage = FixedUsageSource(
+            inventory: [
+                InstalledApplicationUsage(
+                    displayName: target.identity.displayName,
+                    openCount: 10,
+                    lastUsedDaysAgo: 0
+                )
+            ]
+        )
+        let service = RecordingBrainService(
+            .proposal(
+                try rawApplicationCall(
+                    target: target,
+                    reason: "A proposal awaiting evaluation."
+                )
+            )
+        )
+        let failedModel = AvatarModel(
+            usageSource: usage,
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainProposalEvaluator: RecordingProposalEvaluator(
+                .failure(.badResponse("invalid proposal confidence"))
+            ),
+            brainServerController: readyServerController()
+        )
+
+        await previewBrainApplication(with: failedModel)
+        #expect(failedModel.pendingApplicationProposal == nil)
+        #expect(failedModel.pendingTaskSequence == nil)
+        #expect(failedModel.brainStatus == "I couldn’t work out what to do with that.")
+
+        let controlled = ControlledProposalEvaluator()
+        let cancelledModel = AvatarModel(
+            usageSource: usage,
+            brainService: service,
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainProposalEvaluator: controlled,
+            brainServerController: readyServerController()
+        )
+        cancelledModel.isBrainEnabled = true
+        cancelledModel.command = "choose an app"
+        cancelledModel.previewCommand()
+        for _ in 0..<200 {
+            if await controlled.hasStarted() { break }
+            await Task.yield()
+        }
+        #expect(await controlled.hasStarted())
+
+        cancelledModel.setBrainEnabled(false)
+        await controlled.finishAfterCancellation(
+            returning: BrainProposalConfidence(score: 1, alternatives: [])
+        )
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(cancelledModel.pendingApplicationProposal == nil)
+        #expect(cancelledModel.pendingTaskSequence == nil)
+        #expect(
+            cancelledModel.brainStatus
+                == "Natural language is off. Type exact commands."
+        )
+    }
+
+    @Test("Malformed injected confidence cannot fail open into a preview")
+    func malformedInjectedConfidenceFailsClosed() async throws {
+        let target = try #require(exactInstalledApplications(count: 1).first)
+        let usage = InstalledApplicationUsage(
+            displayName: target.identity.displayName,
+            openCount: 10,
+            lastUsedDaysAgo: 0
+        )
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(inventory: [usage]),
+            brainService: RecordingBrainService(
+                .proposal(
+                    try rawApplicationCall(
+                        target: target,
+                        reason: "This must not publish."
+                    )
+                )
+            ),
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainProposalEvaluator: RecordingProposalEvaluator(
+                .confidence(
+                    BrainProposalConfidence(score: .nan, alternatives: [])
+                )
+            ),
+            brainServerController: readyServerController()
+        )
+
+        await previewBrainApplication(with: model)
+
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.brainReason == nil)
+    }
+
+    @Test("Low-confidence chains ask for app names in order")
+    func lowConfidenceChainUsesPluralClarification() async throws {
+        let applications = try exactInstalledApplications(count: 2)
+        let first = try #require(applications.first)
+        let second = try #require(applications.dropFirst().first)
+        let calls = [
+            try rawApplicationCall(
+                target: first,
+                reason: "First uncertain step."
+            ),
+            try rawApplicationCall(
+                target: second,
+                reason: "Second uncertain step."
+            ),
+        ]
+        let model = AvatarModel(
+            usageSource: FixedUsageSource(
+                inventory: applications.map {
+                    InstalledApplicationUsage(
+                        displayName: $0.identity.displayName,
+                        openCount: 10,
+                        lastUsedDaysAgo: 0
+                    )
+                }
+            ),
+            brainService: RecordingBrainService(.proposals(calls)),
+            brainIntentRouter: RecordingIntentRouter(.lane(.nativeApp)),
+            brainProposalEvaluator: RecordingProposalEvaluator(
+                .confidence(
+                    BrainProposalConfidence(
+                        score: 0.2,
+                        alternatives: []
+                    )
+                )
+            ),
+            brainServerController: readyServerController()
+        )
+
+        await previewBrainApplication(with: model)
+
+        #expect(model.pendingTaskSequence == nil)
+        #expect(model.pendingApplicationProposal == nil)
+        #expect(
+            model.brainStatus
+                == "I’m not sure which apps you mean. Please name them in order."
+        )
+    }
+}

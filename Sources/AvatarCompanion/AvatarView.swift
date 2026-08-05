@@ -1,4 +1,5 @@
 import AvatarCore
+import Foundation
 import SwiftUI
 
 struct AvatarView: View {
@@ -116,6 +117,41 @@ struct AvatarView: View {
                 .controlSize(.large)
             }
 
+            Toggle(
+                "Natural language",
+                isOn: Binding(
+                    get: { model.isBrainEnabled },
+                    set: { model.setBrainEnabled($0) }
+                )
+            )
+            .disabled(model.safety.emergencyStopped)
+            .accessibilityHint(
+                "Uses the local model only after exact command parsing declines"
+            )
+
+            HStack(alignment: .top, spacing: 6) {
+                if model.isBrainThinking {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Text(model.brainStatus)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            HStack(alignment: .center, spacing: 8) {
+                Text(model.brainCorrectionStatus)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                Button("Clear learned corrections") {
+                    model.clearBrainCorrections()
+                }
+                .buttonStyle(.borderless)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+
             Button {
                 model.openSearch()
                 searchFocused = true
@@ -148,6 +184,14 @@ struct AvatarView: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+
+            if let sequence = model.pendingTaskSequence {
+                taskSequenceCard(sequence)
+            }
+
+            if !model.taskSequenceOutcomes.isEmpty {
+                taskSequenceProgressCard()
+            }
 
             if let sequence = model.pendingApplicationSequence {
                 applicationSequenceCard(sequence)
@@ -613,6 +657,18 @@ struct AvatarView: View {
                     || model.isExecutingApplicationAction
             )
 
+            Button("Not this app") {
+                model.declineApplicationAction()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(model.isExecutingApplicationAction)
+            .accessibilityHint(
+                model.brainReason == nil
+                    ? "Dismisses this proposal without running it"
+                    : "Dismisses this proposal and stores a local correction"
+            )
+
             if model.safety.observeOnly {
                 Text("Turn off Observe only to enable this one confirmation.")
                     .font(.caption)
@@ -692,6 +748,43 @@ struct AvatarView: View {
                     .controlSize(.large)
                     .disabled(model.researchAuthorization != nil)
                 }
+
+                TextField(
+                    "What should I answer from this page?",
+                    text: $model.readPageQuestion
+                )
+                .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Question about approved page")
+
+                Button("Read approved page") {
+                    guard let url = URL(
+                        string: model.officialDocumentationURL
+                    ) else { return }
+                    model.readApprovedPage(
+                        url: url,
+                        question: model.readPageQuestion
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(
+                    !model.canReadCurrentApprovedURL
+                        || model.readPageQuestion.trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                        ).isEmpty
+                        || model.safety.emergencyStopped
+                )
+
+                if !model.readPageStatus.isEmpty {
+                    Text(model.readPageStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("Redacted page-read audit records: \(model.pageReadAuditEvents.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 Divider()
 
@@ -800,11 +893,83 @@ struct AvatarView: View {
         .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
     }
 
+    private func taskSequenceCard(_ sequence: TaskSequence) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(
+                "\(sequence.steps.count) requests, in order",
+                systemImage: "list.number"
+            )
+            .font(.caption.weight(.semibold))
+
+            ForEach(Array(sequence.steps.enumerated()), id: \.element.id) {
+                index, step in
+                Text("\(index + 1). \(step.summary)")
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text(model.taskSequenceStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("Confirm and run all \(sequence.steps.count)") {
+                model.confirmTaskSequence()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!model.taskSequenceExecutionReady)
+
+            Text(
+                "One confirmation authorizes this exact list. Each step is re-checked as it starts, and the first failure stops the rest."
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func taskSequenceProgressCard() -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Progress", systemImage: "checkmark.circle")
+                .font(.caption.weight(.semibold))
+
+            ForEach(model.taskSequenceOutcomes, id: \.index) { outcome in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(
+                        systemName: outcome.outcome == .succeeded
+                            ? "checkmark.circle.fill"
+                            : "xmark.circle.fill"
+                    )
+                    .foregroundStyle(
+                        outcome.outcome == .succeeded ? .green : .orange
+                    )
+                    Text("\(outcome.index + 1). \(outcome.summary)")
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.caption)
+            }
+
+            if model.isExecutingTaskSequence {
+                Text("Working…").foregroundStyle(.orange).font(.caption)
+            } else {
+                Text(model.taskSequenceStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(10)
+        .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+    }
+
     private func computerUsePreview(
         _ preview: ComputerUsePreview
     ) -> some View {
         VStack(alignment: .leading, spacing: 7) {
-            Label("Non-executable preview", systemImage: "eye")
+            Label("Plan preview — nothing runs until you confirm", systemImage: "eye")
                 .font(.caption.weight(.semibold))
 
             Text(
@@ -848,8 +1013,29 @@ struct AvatarView: View {
                 }
             }
 
-            Text("Execution: disabled by preview-only adapter.")
+            Divider()
+
+            Text(model.computerUseActionStatus)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("Confirm and run these steps") {
+                model.confirmComputerUseAction()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!model.computerUseExecutionReady)
+
+            if model.isExecutingComputerUseAction {
+                Text("Running… keep the target app in front.")
+                    .foregroundStyle(.orange)
+            }
+
+            Text(
+                "Redacted action audit records: \(model.computerUseAuditEvents.count)"
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
         .font(.caption)
         .padding(10)

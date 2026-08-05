@@ -1,0 +1,75 @@
+{
+  "name": "ospa-brain",
+  "pattern": "router+orchestrator+evaluator",
+  "goal": "Turn a non-technical user's plain-language request into gated ActionPlans, doing 90% locally (free) and escalating only the hard ~10% to a cloud model with a tight, redacted task spec.",
+  "principles": [
+    "local-first: local Qwen3-VL-8B (MLX) handles routing, reading, planning, easy steps",
+    "escalate-not-default: cloud is called only when the evaluator gate fails",
+    "structure-first web: fetch+readability -> a11y/DOM browser -> vision (last resort)",
+    "brain emits ActionPlans only; OSPA consent/preflight/audit gates stay terminal",
+    "redact before any cloud handoff: no secrets, no raw page dumps, no AX labels",
+    "hand CAPTCHAs/logins back to the human, never auto-solve"
+  ],
+  "router": {
+    "agent": "intent_router",
+    "model": "local",
+    "routes": ["native_app", "web_info", "web_task", "chat"],
+    "fallback": "chat"
+  },
+  "handlers": {
+    "native_app": {
+      "orchestrator": "local_planner",
+      "emits": "ActionPlan(foregroundComputerUse)",
+      "executor": "RealForegroundInputAdapter"
+    },
+    "web_info": {
+      "orchestrator": "local_planner",
+      "tier_ladder": [
+        {"tier": 0, "name": "fetch_readability", "model": "local", "handles_pct": 90},
+        {"tier": 1, "name": "structured_browser_a11y_dom", "model": "local", "escalates_to": "cloud_hard_step"},
+        {"tier": 2, "name": "vision", "model": "local_vlm", "use": "last_resort_only"}
+      ]
+    },
+    "web_task": {
+      "orchestrator": "local_planner",
+      "control": "structured_browser_a11y_dom",
+      "hard_step_policy": "evaluator_escalation"
+    },
+    "chat": {"agent": "local_planner", "model": "local"}
+  },
+  "evaluator": {
+    "agent": "local_evaluator",
+    "criteria": ["valid_action_json", "confidence", "safety", "matches_user_goal"],
+    "pass_threshold": 0.75,
+    "on_fail": "escalate_to_cloud",
+    "max_iterations": 2
+  },
+  "cloud_hard_step": {
+    "agent": "cloud_executor",
+    "input": "redacted task spec drafted by local_planner",
+    "scope": "one bounded step, do exactly what the spec says"
+  },
+  "handoff_contract": {
+    "workflow_id": "uuid",
+    "step_id": "uuid",
+    "task": "string",
+    "constraints": ["string"],
+    "upstream_artifacts": ["bounded, redacted"],
+    "budget_tokens": 4000,
+    "timeout_seconds": 60,
+    "target_bundle_id": "string|null",
+    "permission_scopes": ["accessibility(bundle)|network(hosts)|..."],
+    "risk": "readOnly|reversible|meaningful|destructive",
+    "requires_confirmation": "bool",
+    "redaction": "no secrets, no credentials, no raw page text, no AX labels"
+  },
+  "failure_and_cost_controls": {
+    "retry": {"max_attempts": 2, "backoff_seconds": 2},
+    "per_step_token_budget": 4000,
+    "cloud_call_cap_per_task": 5,
+    "timeouts": {"local_step_seconds": 30, "cloud_step_seconds": 60, "browser_nav_seconds": 20},
+    "emergency_stop": "halts entire DAG immediately",
+    "human_handoff_triggers": ["captcha", "login_wall", "payment", "destructive_confirmation"],
+    "context_discipline": "local reads verbose context; only distilled bounded spec crosses to cloud, never full page/history"
+  }
+}
